@@ -32,6 +32,7 @@ export interface SessionConfig {
   systemPrompt?: string;
   allowedTools?: string[];
   originChannel?: string;  // Channel that spawned this session (for background notifications)
+  deliverChannel?: string; // Channel for --deliver args in wakeAgent() (resolved from launching agent's workspace)
   originAgentId?: string;  // Agent ID that launched this session (for targeted wake events)
   permissionMode?: PermissionMode;
 

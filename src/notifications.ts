@@ -239,9 +239,10 @@ export class NotificationRouter {
           `   Use claude_fg to check on it, or claude_kill to stop it.`,
         ].join("\n");
 
-        // Try to notify the origin channel if available
-        if (session.originChannel) {
-          this.sendMessage(session.originChannel, msg);
+        // Try to notify the deliver channel (launching agent's channel), falling back to origin
+        const notifyChannel = session.deliverChannel ?? session.originChannel;
+        if (notifyChannel) {
+          this.sendMessage(notifyChannel, msg);
         }
       }
     }

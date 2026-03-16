@@ -48,7 +48,7 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
         };
       }
 
-      const session = sessionManager.resolve(params.session);
+      const session = sessionManager.resolve(params.session, ctx?.agentId);
 
       if (!session) {
         return {

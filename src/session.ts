@@ -114,6 +114,9 @@ export class Session {
   // Origin channel -- the channel that launched this session (for background notifications)
   originChannel?: string;
 
+  // Deliver channel -- the agent's own channel for --deliver args in wakeAgent()
+  readonly deliverChannel?: string;
+
   // Origin agent ID -- the agent that launched this session (for targeted wake events)
   readonly originAgentId?: string;
 
@@ -142,6 +145,7 @@ export class Session {
     this.allowedTools = config.allowedTools;
     this.permissionMode = config.permissionMode ?? pluginConfig.permissionMode ?? "bypassPermissions";
     this.originChannel = config.originChannel;
+    this.deliverChannel = config.deliverChannel;
     this.originAgentId = config.originAgentId;
     this.resumeSessionId = config.resumeSessionId;
     this.forkSession = config.forkSession;
