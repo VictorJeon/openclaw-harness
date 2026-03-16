@@ -19,6 +19,22 @@ export let pluginConfig: PluginConfig = {
 };
 
 export function setPluginConfig(config: Partial<PluginConfig>): void {
+  // Expand environment variables in agentChannels keys.
+  // The gateway resolves env vars in config values but not in object keys,
+  // so patterns like "${HOME}/projects" need to be expanded here.
+  let agentChannels = config.agentChannels;
+  if (agentChannels) {
+    const expanded: Record<string, string> = {};
+    for (const [key, value] of Object.entries(agentChannels)) {
+      const resolvedKey = key.replace(/\$\{(\w+)\}/g, (match, varName) => {
+        const envValue = process.env[varName];
+        return envValue !== undefined ? envValue : match;
+      });
+      expanded[resolvedKey] = value;
+    }
+    agentChannels = expanded;
+  }
+
   pluginConfig = {
     maxSessions: config.maxSessions ?? 5,
     defaultBudgetUsd: config.defaultBudgetUsd ?? 5,
@@ -27,7 +43,7 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     idleTimeoutMinutes: config.idleTimeoutMinutes ?? 30,
     maxPersistedSessions: config.maxPersistedSessions ?? 50,
     fallbackChannel: config.fallbackChannel,
-    agentChannels: config.agentChannels,
+    agentChannels,
     maxAutoResponds: config.maxAutoResponds ?? 10,
   };
 }
