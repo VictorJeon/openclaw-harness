@@ -1,6 +1,6 @@
 {
   "name": "@betrue/openclaw-claude-code-plugin",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
