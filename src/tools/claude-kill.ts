@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { sessionManager } from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
-export function makeClaudeKillTool(_ctx?: OpenClawPluginToolContext) {
+export function makeClaudeKillTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "claude_kill",
     description: "Terminate a running Claude Code session by name or ID.",
@@ -21,7 +21,7 @@ export function makeClaudeKillTool(_ctx?: OpenClawPluginToolContext) {
         };
       }
 
-      const session = sessionManager.resolve(params.session);
+      const session = sessionManager.resolve(params.session, ctx?.agentId);
 
       if (!session) {
         return {

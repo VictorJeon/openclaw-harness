@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { sessionManager, formatDuration } from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
-export function makeClaudeOutputTool(_ctx?: OpenClawPluginToolContext) {
+export function makeClaudeOutputTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "claude_output",
     description: "Show recent output from a Claude Code session (by name or ID).",
@@ -31,7 +31,7 @@ export function makeClaudeOutputTool(_ctx?: OpenClawPluginToolContext) {
         };
       }
 
-      const session = sessionManager.resolve(params.session);
+      const session = sessionManager.resolve(params.session, ctx?.agentId);
 
       if (!session) {
         return {

@@ -91,6 +91,7 @@ export function registerClaudeResumeCommand(api: any): void {
           resumeSessionId: claudeSessionId,
           forkSession: fork,
           originChannel: resolveOriginChannel(ctx),
+          deliverChannel: persisted?.deliverChannel,
         });
 
         const promptSummary =

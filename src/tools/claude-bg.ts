@@ -48,7 +48,7 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
 
       // If a specific session is given, detach it
       if (params.session) {
-        const session = sessionManager.resolve(params.session);
+        const session = sessionManager.resolve(params.session, ctx?.agentId);
         if (!session) {
           return {
             content: [

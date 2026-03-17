@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { Type } from "@sinclair/typebox";
-import { sessionManager, pluginConfig, resolveOriginChannel, resolveAgentChannel, resolveAgentId } from "../shared";
+import { sessionManager, pluginConfig, resolveAgentChannel, resolveAgentId } from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
@@ -91,7 +91,7 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
         // Resolve resume_session_id: accept name, internal ID, or Claude UUID
         let resolvedResumeId = params.resume_session_id;
         if (resolvedResumeId) {
-          const resolved = sessionManager.resolveClaudeSessionId(resolvedResumeId);
+          const resolved = sessionManager.resolveClaudeSessionId(resolvedResumeId, ctx.agentId);
           if (!resolved) {
             return {
               content: [
@@ -105,39 +105,58 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
           resolvedResumeId = resolved;
         }
 
-        // Build channel from ctx if available.
-        // Priority: 1) ctx.messageChannel with injected accountId (if multi-segment)
-        //           2) resolveAgentChannel(ctx.workspaceDir) from agentChannels config
-        //           3) resolveAgentChannel(workdir) as secondary workspace lookup
-        //           4) ctx.messageChannel as-is (if it already has |)
-        let ctxChannel: string | undefined;
-        if (ctx.messageChannel && ctx.agentAccountId) {
-          const parts = ctx.messageChannel.split("|");
-          if (parts.length >= 2) {
-            ctxChannel = `${parts[0]}|${ctx.agentAccountId}|${parts.slice(1).join("|")}`;
-          }
-        }
-        // If messageChannel was bare (e.g. "telegram"), fall back to workspace-based lookup
-        if (!ctxChannel && ctx.workspaceDir) {
-          ctxChannel = resolveAgentChannel(ctx.workspaceDir);
-        }
-        if (!ctxChannel && ctx.messageChannel && ctx.messageChannel.includes("|")) {
-          ctxChannel = ctx.messageChannel;
+        // Build originChannel with fallback chain:
+        // 1) resolveAgentChannel(workdir)        — the SESSION's workdir (most specific)
+        // 2) resolveAgentChannel(ctx.workspaceDir) — the AGENT's workspace
+        // 3) ctx.messageChannel with injected accountId
+        // 4) ctx.messageChannel as-is (if it already has |)
+        // 5) pluginConfig.fallbackChannel
+        let originChannel: string | undefined;
+
+        // Tier 1: session workdir → agentChannels
+        originChannel = resolveAgentChannel(workdir);
+
+        // Tier 2: agent workspace → agentChannels
+        if (!originChannel && ctx.workspaceDir) {
+          originChannel = resolveAgentChannel(ctx.workspaceDir);
         }
 
-        // Resolve origin channel with fallback chain:
-        // 1. ctx-based channel (from above)
-        // 2. resolveAgentChannel(workdir) — workdir may differ from ctx.workspaceDir
-        // 3. resolveOriginChannel falls back to pluginConfig.fallbackChannel
-        let originChannel = resolveOriginChannel(
-          { id: _id },
-          ctxChannel || resolveAgentChannel(workdir),
-        );
-        if (originChannel === "unknown") {
-          const agentChannel = resolveAgentChannel(workdir);
-          if (agentChannel) {
-            originChannel = agentChannel;
+        // Tier 3: ctx.messageChannel with injected accountId
+        if (!originChannel && ctx.messageChannel && ctx.agentAccountId) {
+          const parts = ctx.messageChannel.split("|");
+          if (parts.length >= 2) {
+            originChannel = `${parts[0]}|${ctx.agentAccountId}|${parts.slice(1).join("|")}`;
           }
+        }
+
+        // Tier 4: ctx.messageChannel as-is (if multi-segment)
+        if (!originChannel && ctx.messageChannel && ctx.messageChannel.includes("|")) {
+          originChannel = ctx.messageChannel;
+        }
+
+        // Tier 5: pluginConfig.fallbackChannel
+        if (!originChannel) {
+          originChannel = pluginConfig.fallbackChannel ?? "unknown";
+        }
+
+        // Build deliverChannel: the AGENT's own channel for --deliver args in wakeAgent().
+        // This ensures the wake response is delivered back to the launching agent's workspace,
+        // not the session's workdir (which may differ).
+        let deliverChannel: string | undefined;
+        if (ctx.workspaceDir) {
+          deliverChannel = resolveAgentChannel(ctx.workspaceDir);
+        }
+        if (!deliverChannel && ctx.messageChannel && ctx.agentAccountId) {
+          const parts = ctx.messageChannel.split("|");
+          if (parts.length >= 2) {
+            deliverChannel = `${parts[0]}|${ctx.agentAccountId}|${parts.slice(1).join("|")}`;
+          }
+        }
+        if (!deliverChannel && ctx.messageChannel && ctx.messageChannel.includes("|")) {
+          deliverChannel = ctx.messageChannel;
+        }
+        if (!deliverChannel) {
+          deliverChannel = originChannel; // fallback to originChannel for backward compat
         }
 
         // --- Pre-launch safety guards ---
@@ -411,6 +430,7 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
           multiTurn: !params.multi_turn_disabled,
           permissionMode: params.permission_mode,
           originChannel,
+          deliverChannel,
           originAgentId: ctx.agentId || undefined,
         });
 

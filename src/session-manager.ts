@@ -47,6 +47,7 @@ interface PersistedSessionInfo {
   costUsd: number;
   originAgentId?: string;
   originChannel?: string;
+  deliverChannel?: string;
 }
 
 /** Debounce interval for waiting-for-input events (ms) */
@@ -214,6 +215,7 @@ export class SessionManager {
       costUsd: session.costUsd,
       originAgentId: session.originAgentId,
       originChannel: session.originChannel,
+      deliverChannel: session.deliverChannel,
     };
 
     // Store by internal ID
@@ -337,7 +339,7 @@ export class SessionManager {
       return;
     }
 
-    const deliverArgs = this.buildDeliverArgs(session.originChannel);
+    const deliverArgs = this.buildDeliverArgs(session.deliverChannel ?? session.originChannel);
     const child = spawn("openclaw", ["agent", "--agent", agentId, "--message", eventText, ...deliverArgs], {
       detached: true,
       stdio: "ignore",
@@ -369,7 +371,7 @@ export class SessionManager {
       return;
     }
 
-    const channel = session.originChannel || "unknown";
+    const channel = session.deliverChannel ?? session.originChannel ?? "unknown";
     console.log(`[SessionManager] Delivering ${label} to Telegram for session=${session.id} via channel=${channel}`);
     this.notificationRouter.emitToChannel(channel, notificationText);
   }
@@ -519,9 +521,9 @@ export class SessionManager {
    * Resolve a Claude session ID from our internal ID, name, or Claude session ID.
    * Looks in both active sessions and persisted (completed/GC'd) sessions.
    */
-  resolveClaudeSessionId(ref: string): string | undefined {
+  resolveClaudeSessionId(ref: string, agentId?: string): string | undefined {
     // 1. Check active sessions
-    const active = this.resolve(ref);
+    const active = this.resolve(ref, agentId);
     if (active?.claudeSessionId) return active.claudeSessionId;
 
     // 2. Check persisted sessions
@@ -559,17 +561,26 @@ export class SessionManager {
 
   /**
    * Resolve a session by ID or name.
+   * When agentId is provided, only returns the session if it was launched by that agent.
+   * When agentId is undefined (commands, gateway), no ownership filtering is applied.
    */
-  resolve(idOrName: string): Session | undefined {
+  resolve(idOrName: string, agentId?: string): Session | undefined {
     // Try ID first (exact match)
-    const byId = this.sessions.get(idOrName);
-    if (byId) return byId;
+    let session = this.sessions.get(idOrName);
 
     // Try name match
-    for (const session of this.sessions.values()) {
-      if (session.name === idOrName) return session;
+    if (!session) {
+      for (const s of this.sessions.values()) {
+        if (s.name === idOrName) { session = s; break; }
+      }
     }
-    return undefined;
+
+    if (!session) return undefined;
+
+    // Agent isolation: if agentId provided, enforce ownership
+    if (agentId && session.originAgentId !== agentId) return undefined;
+
+    return session;
   }
 
   get(id: string): Session | undefined {
