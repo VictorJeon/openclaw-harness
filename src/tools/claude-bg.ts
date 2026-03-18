@@ -62,11 +62,10 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
 
         let channelId = resolveOriginChannel({ id: _id }, fallbackChannel);
         console.log(`[claude-bg] channelId resolved: ${channelId}, session.workdir=${session.workdir}`);
-        if (channelId === "unknown") {
-          const agentChannel = resolveAgentChannel(session.workdir);
-          if (agentChannel) {
-            channelId = agentChannel;
-          }
+        // Use the session's stored originChannel (resolved from the agent's workspace
+        // at creation time) instead of re-resolving from session.workdir.
+        if (channelId === "unknown" && session.originChannel && session.originChannel !== "unknown") {
+          channelId = session.originChannel;
         }
         session.saveFgOutputOffset(channelId);
         session.foregroundChannels.delete(channelId);
@@ -84,12 +83,12 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
       let resolvedId = resolveOriginChannel({ id: _id }, fallbackChannel);
       console.log(`[claude-bg] resolvedId (no session): ${resolvedId}`);
       if (resolvedId === "unknown") {
-        // Try each session's workdir to find a matching agent channel
+        // Try each session's stored originChannel (resolved from the agent's workspace
+        // at creation time) to find one with a matching foreground channel.
         const allSessionsForLookup = sessionManager.list("all");
         for (const s of allSessionsForLookup) {
-          const agentChannel = resolveAgentChannel(s.workdir);
-          if (agentChannel && s.foregroundChannels.has(agentChannel)) {
-            resolvedId = agentChannel;
+          if (s.originChannel && s.originChannel !== "unknown" && s.foregroundChannels.has(s.originChannel)) {
+            resolvedId = s.originChannel;
             break;
           }
         }

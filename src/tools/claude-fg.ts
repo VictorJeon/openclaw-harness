@@ -66,12 +66,12 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
       console.log(`[claude-fg] channelId resolved: ${channelId}, session.workdir=${session.workdir}`);
 
       // If resolveOriginChannel couldn't determine a real channel (returned "unknown"),
-      // try resolving via the session's workdir → agentChannels mapping as a fallback.
-      if (channelId === "unknown") {
-        const agentChannel = resolveAgentChannel(session.workdir);
-        if (agentChannel) {
-          channelId = agentChannel;
-        }
+      // use the session's stored originChannel (resolved from the agent's workspace at
+      // creation time). This avoids re-resolving from session.workdir, which may not
+      // match any agentChannels entry (the session workdir is where Claude Code runs,
+      // not necessarily the agent's workspace).
+      if (channelId === "unknown" && session.originChannel && session.originChannel !== "unknown") {
+        channelId = session.originChannel;
       }
 
       // Get catchup output (produced while this channel was backgrounded)
