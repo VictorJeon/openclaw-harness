@@ -162,10 +162,32 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
 
         // --- Pre-launch safety guards ---
         // All guards can be skipped via pluginConfig.skipSafetyChecks for dev/testing.
-        const agentWorkspace = ctx.workspaceDir || workdir;
+        // We use ctx.workspaceDir (the agent's own workspace) — NOT workdir (the session's
+        // working directory). No agent workspace = no launch: we block rather than falling
+        // back to workdir, which would create a session with broken routing.
+        const agentWorkspace = ctx.workspaceDir;
 
         if (pluginConfig.skipSafetyChecks) {
           console.log(`[claude-launch] Safety checks skipped (skipSafetyChecks=true)`);
+        } else if (!agentWorkspace) {
+          console.log(`[claude-launch] No agent workspace detected (ctx.workspaceDir is undefined) — blocking launch`);
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: [
+                  `ERROR: Launch blocked — no agent workspace detected.`,
+                  ``,
+                  `ctx.workspaceDir is undefined, so safety guards and channel routing`,
+                  `cannot resolve the agent's workspace. This usually means the tool was`,
+                  `invoked outside an agent context.`,
+                  ``,
+                  `Ensure the agent has a configured workspaceDir before launching sessions.`,
+                ].join("\n"),
+              },
+            ],
+          };
         } else {
           // Guard: require autonomy skill in the agent's workspace before spawning.
           // The skill defines how the agent should handle Claude Code interactions
@@ -383,23 +405,24 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
           // channels so Claude Code sessions can route notifications to the correct agent/chat.
           // We check ctx.workspaceDir (the agent's own workspace), NOT the session's workdir
           // (which is just where Claude Code will work — it may be a different project).
-          const agentChannelForWorkspace = resolveAgentChannel(agentWorkspace);
+          const agentChannelForWorkspace = agentWorkspace ? resolveAgentChannel(agentWorkspace) : undefined;
           if (!agentChannelForWorkspace) {
-            console.log(`[claude-launch] No agentChannels mapping for agent workspace "${agentWorkspace}" — blocking launch`);
+            const displayPath = ctx.workspaceDir || workdir;
+            console.log(`[claude-launch] No agentChannels mapping for agent workspace "${displayPath}" — blocking launch`);
             return {
               isError: true,
               content: [
                 {
                   type: "text",
                   text: [
-                    `ERROR: Launch blocked — no agentChannels mapping found for agent workspace "${agentWorkspace}".`,
+                    `ERROR: Launch blocked — no agentChannels mapping found for agent workspace "${displayPath}".`,
                     ``,
                     `The agentChannels config maps agent workspaces to notification channels.`,
                     `Your agent workspace must be configured so notifications can be routed correctly.`,
                     ``,
                     `Add your agent workspace to agentChannels in ~/.openclaw/openclaw.json:`,
                     ``,
-                    `   plugins.entries["openclaw-claude-code-plugin"].config.agentChannels["${agentWorkspace}"] = "telegram|accountId|chatId"`,
+                    `   plugins.entries["openclaw-claude-code-plugin"].config.agentChannels["${displayPath}"] = "telegram|accountId|chatId"`,
                     ``,
                     `Then restart the Gateway and retry the launch.`,
                   ].join("\n"),

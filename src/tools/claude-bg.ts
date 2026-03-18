@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, resolveOriginChannel, resolveAgentChannel } from "../shared";
+import { sessionManager, resolveOriginChannel, resolveAgentChannel, hasValidOriginChannel } from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
@@ -64,7 +64,7 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
         console.log(`[claude-bg] channelId resolved: ${channelId}, session.workdir=${session.workdir}`);
         // Use the session's stored originChannel (resolved from the agent's workspace
         // at creation time) instead of re-resolving from session.workdir.
-        if (channelId === "unknown" && session.originChannel && session.originChannel !== "unknown") {
+        if (channelId === "unknown" && hasValidOriginChannel(session)) {
           channelId = session.originChannel;
         }
         session.saveFgOutputOffset(channelId);
@@ -87,7 +87,7 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
         // at creation time) to find one with a matching foreground channel.
         const allSessionsForLookup = sessionManager.list("all");
         for (const s of allSessionsForLookup) {
-          if (s.originChannel && s.originChannel !== "unknown" && s.foregroundChannels.has(s.originChannel)) {
+          if (hasValidOriginChannel(s) && s.foregroundChannels.has(s.originChannel!)) {
             resolvedId = s.originChannel;
             break;
           }

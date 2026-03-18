@@ -127,7 +127,7 @@ export function resolveAgentId(workdir: string): string | undefined {
 }
 
 /**
- * Look up the notification channel for a given workdir from the agentChannels config.
+ * Look up the notification channel for a given agent workspace from the agentChannels config.
  * Normalises trailing slashes before comparison.
  * Returns undefined if no match is found.
  */
@@ -151,6 +151,15 @@ export function resolveAgentChannel(workdir: string): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Check whether a session has a valid (non-"unknown") originChannel.
+ * Used to decide if we can fall back to the session's stored channel
+ * when resolveOriginChannel returns "unknown".
+ */
+export function hasValidOriginChannel(session: { originChannel?: string }): boolean {
+  return !!session.originChannel && session.originChannel !== "unknown";
 }
 
 export function formatDuration(ms: number): string {

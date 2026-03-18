@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, formatDuration, resolveOriginChannel, resolveAgentChannel } from "../shared";
+import { sessionManager, formatDuration, resolveOriginChannel, resolveAgentChannel, hasValidOriginChannel } from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
@@ -70,7 +70,7 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
       // creation time). This avoids re-resolving from session.workdir, which may not
       // match any agentChannels entry (the session workdir is where Claude Code runs,
       // not necessarily the agent's workspace).
-      if (channelId === "unknown" && session.originChannel && session.originChannel !== "unknown") {
+      if (channelId === "unknown" && hasValidOriginChannel(session)) {
         channelId = session.originChannel;
       }
 

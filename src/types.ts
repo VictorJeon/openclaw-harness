@@ -97,7 +97,7 @@ export interface PluginConfig {
   /**
    * Map of agent working directories to notification channels.
    * When a tool call (e.g. claude_launch) cannot resolve the origin channel
-   * from context, it checks whether the session workdir matches a key here
+   * from context, it checks whether the agent workspace matches a key here
    * and uses the mapped channel for notifications.
    *
    * Example: { "/home/user/my-seo-agent": "telegram|123456789" }
