@@ -9,6 +9,7 @@ import type {
   OpenClawPluginToolContext,
   HarnessPlan,
   OperationMode,
+  ReviewResult,
   WorkerResult,
   CheckpointData,
   TaskSpec,
@@ -299,10 +300,8 @@ async function executeTask(
   ctx: OpenClawPluginToolContext,
   checkpoint: CheckpointData,
 ): Promise<TaskExecutionResult> {
-  // Determine model based on task.agent field
-  const workerModel = task.agent === "codex"
-    ? (pluginConfig.workerModel || pluginConfig.defaultModel)
-    : (pluginConfig.defaultModel || pluginConfig.workerModel);
+  const workerModel = pluginConfig.workerModel ?? "claude";
+  const reviewModel = pluginConfig.reviewModel ?? "codex";
 
   // Budget: split across phases with a remaining counter
   // Initial worker gets 50%. Remaining 50% covers:
@@ -354,35 +353,77 @@ async function executeTask(
 
     // --- Review phase: cross-model review loop ---
     const reviewLoop = initReviewLoop(task.id);
-    const reviewModel = pluginConfig.reviewModel || pluginConfig.defaultModel;
     let currentWorkerResult = workerResult;
 
     while (!reviewLoop.passed && !reviewLoop.escalated) {
-      // Spawn reviewer (single-turn, cross-model)
-      const reviewBudget = Math.min(perPhaseBudget, remainingBudget);
-      remainingBudget -= reviewBudget;
+      let reviewResult: ReviewResult | null = null;
+      let reviewerRetryCount = 0;
 
-      const reviewPrompt = buildReviewRequest(task, currentWorkerResult, plan.originalRequest, reviewLoop);
-      const reviewerSession = sessionManager!.spawn({
-        prompt: reviewPrompt,
-        name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
-        workdir,
-        model: reviewModel,
-        maxBudgetUsd: reviewBudget,
-        systemPrompt: REVIEWER_SYSTEM_PROMPT,
-        permissionMode: "default", // Restrictive: no bypass
-        allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
-        originChannel: ctx.messageChannel,
-        originAgentId: ctx.agentId,
-        multiTurn: false,
-      });
+      while (true) {
+        const reviewBudget = Math.min(perPhaseBudget, remainingBudget);
+        remainingBudget -= reviewBudget;
 
-      recordSession(checkpoint, task.id, "reviewer", reviewerSession.id, workdir);
-      console.log(`[harness] Reviewer spawned: task=${task.id}, session=${reviewerSession.id}, loop=${reviewLoop.history.length + 1}`);
+        const baseReviewPrompt = buildReviewRequest(task, currentWorkerResult, plan.originalRequest, reviewLoop);
+        const reviewPrompt = reviewerRetryCount === 0
+          ? baseReviewPrompt
+          : [
+              baseReviewPrompt,
+              ``,
+              `### Retry Instructions`,
+              `Your previous response was malformed.`,
+              `Return only the single JSON object required by the system prompt.`,
+            ].join("\n");
 
-      // Wait for reviewer to complete
-      const reviewOutput = await waitForOutput(reviewerSession.id);
-      const reviewResult = parseReviewOutput(reviewOutput, task.id);
+        const reviewerSession = sessionManager!.spawn({
+          prompt: reviewPrompt,
+          name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
+          workdir,
+          model: reviewModel,
+          maxBudgetUsd: reviewBudget,
+          systemPrompt: REVIEWER_SYSTEM_PROMPT,
+          permissionMode: "default", // Restrictive: no bypass
+          allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
+          originChannel: ctx.messageChannel,
+          originAgentId: ctx.agentId,
+          multiTurn: false,
+        });
+
+        recordSession(checkpoint, task.id, "reviewer", reviewerSession.id, workdir);
+        console.log(
+          `[harness] Reviewer spawned: task=${task.id}, session=${reviewerSession.id}, loop=${reviewLoop.history.length + 1}, model=${reviewModel}, retry=${reviewerRetryCount}`,
+        );
+
+        const reviewOutput = await waitForOutput(reviewerSession.id);
+        reviewResult = parseReviewOutput(reviewOutput, task.id);
+        if (!reviewResult.retryReviewer) {
+          break;
+        }
+
+        reviewerRetryCount++;
+        if (reviewerRetryCount >= 3) {
+          updateTaskStatus(checkpoint, task.id, "failed", workdir, {
+            reviewPassed: false,
+            reviewLoop: reviewLoop.currentLoop,
+          });
+          return {
+            taskId: task.id,
+            workerSessionId: workerSession.id,
+            workerResult: currentWorkerResult,
+            reviewPassed: false,
+            reviewLoops: reviewLoop.history.length,
+            escalated: true,
+            error: "Reviewer output could not be parsed after 3 attempts",
+          };
+        }
+
+        console.warn(
+          `[harness] Reviewer output malformed: task=${task.id}, retry=${reviewerRetryCount}/3`,
+        );
+      }
+
+      if (!reviewResult) {
+        throw new Error("Reviewer result missing after retry loop");
+      }
 
       const action = processReviewResult(reviewLoop, reviewResult);
       console.log(`[harness] Review result: task=${task.id}, action=${action.action}, gaps=${reviewResult.gaps.length}`);
@@ -437,7 +478,9 @@ async function executeTask(
           multiTurn: false,
         });
 
-        console.log(`[harness] Fixer spawned: task=${task.id}, session=${fixSession.id}, loop=${reviewLoop.currentLoop}`);
+        console.log(
+          `[harness] Fixer spawned: task=${task.id}, session=${fixSession.id}, loop=${reviewLoop.currentLoop}, model=${workerModel}`,
+        );
 
         const fixResult = await waitForCompletion(fixSession.id, task.id);
         if (fixResult) {

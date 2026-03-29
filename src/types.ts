@@ -161,6 +161,7 @@ export interface ReviewResult {
   result: "pass" | "fail";
   gaps: ReviewGap[];
   rerunNeeded: boolean;
+  retryReviewer?: boolean;
 }
 
 export interface CheckpointData {
