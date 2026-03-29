@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, pluginConfig } from "../shared";
+import { sessionManager, pluginConfig, getPluginRuntime } from "../shared";
 import { classifyRequest } from "../router";
 import { buildPlan, searchMemory } from "../planner";
 import { initCheckpoint, loadCheckpoint, updateTaskStatus, recordSession } from "../checkpoint";
@@ -314,33 +314,62 @@ async function executeTask(
   const perPhaseBudget = remainingBudget / totalPhases;
 
   try {
-    // --- Worker phase: single-turn session ---
+    const runtime = getPluginRuntime();
+    const useSubagent = runtime?.subagent?.run != null;
+    const agentId = ctx.agentId ?? "main";
+
+    // --- Worker phase ---
     updateTaskStatus(checkpoint, task.id, "in-progress", workdir);
 
     const workerPrompt = buildWorkerPrompt(task, plan);
-    const workerSession = sessionManager!.spawn({
-      prompt: workerPrompt,
-      name: `harness-${plan.id}-${task.id}`,
-      workdir,
-      model: workerModel,
-      maxBudgetUsd: workerBudget,
-      permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
-      originChannel: ctx.messageChannel,
-      originAgentId: ctx.agentId,
-      multiTurn: false, // Single-turn: completes when done
-    });
+    let workerSessionId = "";
+    let workerResult: WorkerResult | null = null;
 
-    recordSession(checkpoint, task.id, "worker", workerSession.id, workdir);
-    console.log(`[harness] Worker spawned: task=${task.id}, session=${workerSession.id}, model=${workerModel}`);
+    if (useSubagent) {
+      // === ACP/Subagent path: real cross-model ===
+      const workerKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}`;
+      console.log(`[harness] Worker via subagent.run: key=${workerKey}, model=${workerModel}`);
+      const { runId } = await runtime.subagent.run({
+        sessionKey: workerKey,
+        message: `Working directory: ${workdir}\n\n${workerPrompt}`,
+        provider: workerModel === "codex" ? "openai" : "anthropic",
+        model: workerModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+        deliver: false,
+      });
+      workerSessionId = workerKey;
+      const completion = await runtime.subagent.waitForRun({ runId, timeoutMs: 600000 });
+      // Extract result from subagent messages
+      const msgs = await runtime.subagent.getSessionMessages({ sessionKey: workerKey, limit: 5 });
+      const lastMsg = msgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+      workerResult = parseWorkerOutput(lastMsg, task.id);
+      // Cleanup
+      try { await runtime.subagent.deleteSession({ sessionKey: workerKey }); } catch {}
+    } else {
+      // === Fallback: sessionManager.spawn (CC PTY) ===
+      console.warn(`[harness] Fallback to sessionManager.spawn (no runtime.subagent)`);
+      const workerSession = sessionManager!.spawn({
+        prompt: workerPrompt,
+        name: `harness-${plan.id}-${task.id}`,
+        workdir,
+        model: workerModel,
+        maxBudgetUsd: workerBudget,
+        permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
+        originChannel: ctx.messageChannel,
+        originAgentId: ctx.agentId,
+        multiTurn: false,
+      });
+      workerSessionId = workerSession.id;
+      workerResult = await waitForCompletion(workerSession.id, task.id);
+    }
 
-    // Wait for worker to complete
-    const workerResult = await waitForCompletion(workerSession.id, task.id);
+    recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
+    console.log(`[harness] Worker done: task=${task.id}, session=${workerSessionId}, model=${workerModel}, useSubagent=${useSubagent}`);
 
     if (!workerResult) {
       updateTaskStatus(checkpoint, task.id, "failed", workdir);
       return {
         taskId: task.id,
-        workerSessionId: workerSession.id,
+        workerSessionId,
         workerResult: null,
         reviewPassed: false,
         reviewLoops: 0,
@@ -374,26 +403,47 @@ async function executeTask(
               `Return only the single JSON object required by the system prompt.`,
             ].join("\n");
 
-        const reviewerSession = sessionManager!.spawn({
-          prompt: reviewPrompt,
-          name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
-          workdir,
-          model: reviewModel,
-          maxBudgetUsd: reviewBudget,
-          systemPrompt: REVIEWER_SYSTEM_PROMPT,
-          permissionMode: "default", // Restrictive: no bypass
-          allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
-          originChannel: ctx.messageChannel,
-          originAgentId: ctx.agentId,
-          multiTurn: false,
-        });
+        let reviewOutput = "";
 
-        recordSession(checkpoint, task.id, "reviewer", reviewerSession.id, workdir);
+        if (useSubagent) {
+          // === Reviewer via subagent.run — cross-model (Codex/GPT) ===
+          const reviewKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`;
+          console.log(`[harness] Reviewer via subagent.run: key=${reviewKey}, model=${reviewModel}`);
+          const { runId: reviewRunId } = await runtime.subagent.run({
+            sessionKey: reviewKey,
+            message: REVIEWER_SYSTEM_PROMPT + "\n\n---\n\n" + reviewPrompt,
+            provider: reviewModel === "codex" ? "openai" : "anthropic",
+            model: reviewModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+            deliver: false,
+          });
+          recordSession(checkpoint, task.id, "reviewer", reviewKey, workdir);
+          await runtime.subagent.waitForRun({ runId: reviewRunId, timeoutMs: 300000 });
+          const reviewMsgs = await runtime.subagent.getSessionMessages({ sessionKey: reviewKey, limit: 5 });
+          reviewOutput = reviewMsgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+          try { await runtime.subagent.deleteSession({ sessionKey: reviewKey }); } catch {}
+        } else {
+          // === Fallback: sessionManager.spawn ===
+          const reviewerSession = sessionManager!.spawn({
+            prompt: reviewPrompt,
+            name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
+            workdir,
+            model: reviewModel,
+            maxBudgetUsd: reviewBudget,
+            systemPrompt: REVIEWER_SYSTEM_PROMPT,
+            permissionMode: "default",
+            allowedTools: ["Read", "Glob", "Grep", "LS"],
+            originChannel: ctx.messageChannel,
+            originAgentId: ctx.agentId,
+            multiTurn: false,
+          });
+          recordSession(checkpoint, task.id, "reviewer", reviewerSession.id, workdir);
+          reviewOutput = await waitForOutput(reviewerSession.id);
+        }
+
         console.log(
-          `[harness] Reviewer spawned: task=${task.id}, session=${reviewerSession.id}, loop=${reviewLoop.history.length + 1}, model=${reviewModel}, retry=${reviewerRetryCount}`,
+          `[harness] Reviewer done: task=${task.id}, loop=${reviewLoop.history.length + 1}, model=${reviewModel}, retry=${reviewerRetryCount}, useSubagent=${useSubagent}`,
         );
 
-        const reviewOutput = await waitForOutput(reviewerSession.id);
         reviewResult = parseReviewOutput(reviewOutput, task.id);
         if (!reviewResult.retryReviewer) {
           break;
@@ -407,7 +457,7 @@ async function executeTask(
           });
           return {
             taskId: task.id,
-            workerSessionId: workerSession.id,
+            workerSessionId,
             workerResult: currentWorkerResult,
             reviewPassed: false,
             reviewLoops: reviewLoop.history.length,
@@ -436,7 +486,7 @@ async function executeTask(
         });
         return {
           taskId: task.id,
-          workerSessionId: workerSession.id,
+          workerSessionId,
           workerResult: currentWorkerResult,
           reviewPassed: true,
           reviewLoops: reviewLoop.history.length,
@@ -452,7 +502,7 @@ async function executeTask(
         });
         return {
           taskId: task.id,
-          workerSessionId: workerSession.id,
+          workerSessionId,
           workerResult: currentWorkerResult,
           reviewPassed: false,
           reviewLoops: reviewLoop.history.length,
@@ -466,25 +516,46 @@ async function executeTask(
         const fixBudget = Math.min(perPhaseBudget, remainingBudget);
         remainingBudget -= fixBudget;
 
-        const fixSession = sessionManager!.spawn({
-          prompt: action.fixPrompt,
-          name: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
-          workdir,
-          model: workerModel,
-          maxBudgetUsd: fixBudget,
-          permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
-          originChannel: ctx.messageChannel,
-          originAgentId: ctx.agentId,
-          multiTurn: false,
-        });
+        if (useSubagent) {
+          // === Fixer via subagent.run — same model as Worker (Claude) ===
+          const fixKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`;
+          console.log(`[harness] Fixer via subagent.run: key=${fixKey}, model=${workerModel}`);
+          const { runId: fixRunId } = await runtime.subagent.run({
+            sessionKey: fixKey,
+            message: `Working directory: ${workdir}\n\n${action.fixPrompt}`,
+            provider: workerModel === "codex" ? "openai" : "anthropic",
+            model: workerModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+            deliver: false,
+          });
+          await runtime.subagent.waitForRun({ runId: fixRunId, timeoutMs: 600000 });
+          const fixMsgs = await runtime.subagent.getSessionMessages({ sessionKey: fixKey, limit: 5 });
+          const fixText = fixMsgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+          const fixResult = parseWorkerOutput(fixText, task.id);
+          if (fixResult) {
+            currentWorkerResult = fixResult;
+          }
+          try { await runtime.subagent.deleteSession({ sessionKey: fixKey }); } catch {}
+        } else {
+          const fixSession = sessionManager!.spawn({
+            prompt: action.fixPrompt,
+            name: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
+            workdir,
+            model: workerModel,
+            maxBudgetUsd: fixBudget,
+            permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
+            originChannel: ctx.messageChannel,
+            originAgentId: ctx.agentId,
+            multiTurn: false,
+          });
 
-        console.log(
-          `[harness] Fixer spawned: task=${task.id}, session=${fixSession.id}, loop=${reviewLoop.currentLoop}, model=${workerModel}`,
-        );
+          console.log(
+            `[harness] Fixer spawned (fallback): task=${task.id}, session=${fixSession.id}, loop=${reviewLoop.currentLoop}, model=${workerModel}`,
+          );
 
-        const fixResult = await waitForCompletion(fixSession.id, task.id);
-        if (fixResult) {
-          currentWorkerResult = fixResult;
+          const fixResult = await waitForCompletion(fixSession.id, task.id);
+          if (fixResult) {
+            currentWorkerResult = fixResult;
+          }
         }
         // Continue loop → next review iteration
       }
@@ -493,7 +564,7 @@ async function executeTask(
     // Should not reach here, but safety fallback
     return {
       taskId: task.id,
-      workerSessionId: workerSession.id,
+      workerSessionId,
       workerResult: currentWorkerResult,
       reviewPassed: false,
       reviewLoops: reviewLoop.history.length,
@@ -746,4 +817,25 @@ function formatFinalResult(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Parse subagent text output into a WorkerResult.
+ * Subagent returns free-text, so we extract what we can.
+ */
+function parseWorkerOutput(text: string, taskId: string): WorkerResult | null {
+  if (!text || text.trim().length === 0) return null;
+
+  // Try to extract file paths mentioned in the output
+  const filePatterns = text.match(/(?:[\w./-]+\.(?:ts|tsx|js|jsx|py|md|json|yaml|yml|sh|css|html|toml))/g) ?? [];
+  const uniqueFiles = [...new Set(filePatterns)].slice(0, 20);
+
+  return {
+    taskId,
+    status: "completed",
+    summary: text.slice(0, 500),
+    filesChanged: uniqueFiles,
+    testsRun: 0,
+    warnings: [],
+  };
 }

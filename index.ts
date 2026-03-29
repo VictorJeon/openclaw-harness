@@ -18,7 +18,7 @@ import { registerClaudeStatsCommand } from "./src/commands/claude-stats";
 import { registerGatewayMethods } from "./src/gateway";
 import { SessionManager } from "./src/session-manager";
 import { NotificationRouter } from "./src/notifications";
-import { setSessionManager, setNotificationRouter, setPluginConfig, pluginConfig } from "./src/shared";
+import { setSessionManager, setNotificationRouter, setPluginConfig, setPluginRuntime, pluginConfig } from "./src/shared";
 import { execFile } from "child_process";
 
 // Plugin register function - called by OpenClaw when loading the plugin
@@ -65,6 +65,14 @@ export function register(api: any) {
 
       // Store config globally for all modules (Task 20)
       setPluginConfig(config);
+
+      // Store runtime reference for subagent.run() access from harness tools
+      if (api.runtime) {
+        setPluginRuntime(api.runtime);
+        console.log("[harness] api.runtime stored — subagent.run() available");
+      } else {
+        console.warn("[harness] api.runtime not available — falling back to sessionManager.spawn()");
+      }
 
       // Create SessionManager — uses config for maxSessions and maxPersistedSessions
       sm = new SessionManager(

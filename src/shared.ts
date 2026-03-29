@@ -71,6 +71,17 @@ export function setNotificationRouter(nr: NotificationRouter | null): void {
   notificationRouter = nr;
 }
 
+// --- Runtime reference (for subagent.run / ACP access from plugin code) ---
+let _pluginRuntime: any = null;
+
+export function setPluginRuntime(rt: any): void {
+  _pluginRuntime = rt;
+}
+
+export function getPluginRuntime(): any {
+  return _pluginRuntime;
+}
+
 /**
  * Resolve origin channel from an OpenClaw command/tool context.
  *
