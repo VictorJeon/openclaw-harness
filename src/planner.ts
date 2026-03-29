@@ -240,8 +240,17 @@ function canParallelize(tasks: TaskSpec[]): boolean {
   }
 
   // Check for overlapping file paths in scopes — if any two tasks
-  // mention the same file, they must run sequentially
+  // mention the same file, they must run sequentially.
+  // If any scope has NO explicit files, default to sequential (fail-safe).
   const filesByTask = tasks.map((t) => extractScopeFiles(t.scope));
+
+  for (const files of filesByTask) {
+    if (files.length === 0) {
+      // Can't verify disjointness without explicit file paths → sequential
+      return false;
+    }
+  }
+
   for (let i = 0; i < filesByTask.length; i++) {
     for (let j = i + 1; j < filesByTask.length; j++) {
       const overlap = filesByTask[i].filter((f) => filesByTask[j].includes(f));

@@ -200,10 +200,24 @@ async function executePlan(
   const budgetPerTask = maxBudgetUsd / plan.tasks.length;
 
   if (plan.mode === "parallel" && plan.tasks.length > 1) {
-    // Parallel: spawn all workers, then review each
-    const promises = plan.tasks.map((task) =>
-      executeTask(task, plan, workdir, budgetPerTask, ctx, checkpoint),
-    );
+    // Parallel with concurrency limit: cap at half of maxSessions
+    // to reserve slots for review/fix phases
+    const concurrencyLimit = Math.max(1, Math.floor(pluginConfig.maxSessions / 2));
+    const promises: Promise<TaskExecutionResult>[] = [];
+
+    // Execute in batches to avoid exhausting session slots
+    for (let i = 0; i < plan.tasks.length; i += concurrencyLimit) {
+      const batch = plan.tasks.slice(i, i + concurrencyLimit);
+      const batchPromises = batch.map((task) =>
+        executeTask(task, plan, workdir, budgetPerTask, ctx, checkpoint),
+      );
+      promises.push(...batchPromises);
+      // Wait for batch to complete before starting next
+      if (i + concurrencyLimit < plan.tasks.length) {
+        await Promise.allSettled(batchPromises);
+      }
+    }
+
     const settled = await Promise.allSettled(promises);
     for (const result of settled) {
       if (result.status === "fulfilled") {
@@ -250,12 +264,14 @@ async function executeTask(
     : (pluginConfig.defaultModel || pluginConfig.workerModel);
 
   // Budget: split across phases with a remaining counter
-  // Initial worker gets 50%, rest is shared among review/fix cycles
+  // Initial worker gets 50%. Remaining 50% covers:
+  //   1 initial review + maxLoops * (fix + rereview)
+  // Total review/fix phases = 1 + 2*maxLoops
   const maxLoops = pluginConfig.maxReviewLoops;
   const workerBudget = budgetUsd * 0.5;
-  const reviewFixBudget = budgetUsd * 0.5;
-  const perCycleBudget = reviewFixBudget / Math.max(maxLoops, 1);
-  let remainingBudget = reviewFixBudget;
+  let remainingBudget = budgetUsd * 0.5;
+  const totalPhases = 1 + 2 * Math.max(maxLoops, 1); // initial review + (fix+rereview)*N
+  const perPhaseBudget = remainingBudget / totalPhases;
 
   try {
     // --- Worker phase: single-turn session ---
@@ -302,13 +318,16 @@ async function executeTask(
 
     while (!reviewLoop.passed && !reviewLoop.escalated) {
       // Spawn reviewer (single-turn, cross-model)
+      const reviewBudget = Math.min(perPhaseBudget, remainingBudget);
+      remainingBudget -= reviewBudget;
+
       const reviewPrompt = buildReviewRequest(task, currentWorkerResult, plan.originalRequest, reviewLoop);
       const reviewerSession = sessionManager!.spawn({
         prompt: reviewPrompt,
         name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
         workdir,
         model: reviewModel,
-        maxBudgetUsd: Math.min(perCycleBudget * 0.4, remainingBudget * 0.4), // review portion of cycle
+        maxBudgetUsd: reviewBudget,
         systemPrompt: REVIEWER_SYSTEM_PROMPT,
         permissionMode: "default", // Restrictive: no bypass
         allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
@@ -362,8 +381,8 @@ async function executeTask(
 
       // action === "fix": spawn a fixer session with gap feedback
       if (action.action === "fix") {
-        const fixBudget = Math.min(perCycleBudget * 0.6, remainingBudget * 0.6);
-        remainingBudget -= perCycleBudget;
+        const fixBudget = Math.min(perPhaseBudget, remainingBudget);
+        remainingBudget -= fixBudget;
 
         const fixSession = sessionManager!.spawn({
           prompt: action.fixPrompt,
@@ -529,6 +548,12 @@ const RISKY_CONFIG_PATTERNS = [
   /\bapi[_-]?key/i,
   /\btoken\b.*\b(수정|변경|update|change|set)\b/i,
   /openclaw\.json/i,
+  /package\.json/i,
+  /tsconfig/i,
+  /\.ya?ml\b.*\b(config|설정)/i,
+  /docker(file|compose)/i,
+  /nginx\.conf/i,
+  /\.gitignore/i,
 ];
 
 function isRiskyTier0(request: string): boolean {
