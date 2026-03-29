@@ -62,6 +62,12 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       max_budget_usd: Type.Optional(
         Type.Number({ description: "Maximum budget in USD (default from config)" }),
       ),
+      approved_plan_id: Type.Optional(
+        Type.String({
+          description:
+            "Plan ID from a previous approval-gated response. Pass this to skip the approval gate and execute the approved plan.",
+        }),
+      ),
     }),
     async execute(_id: string, params: any) {
       if (!sessionManager) {
@@ -85,41 +91,45 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       console.log(`[harness] Route: tier=${tier}, confidence=${route.confidence}, reason=${route.reason}`);
 
       // Step 2: Approval gate
-      // Ask mode: require approval for everything except safe tier 0
-      // Delegate mode: require approval for risky ops (tier 2 or risky config)
-      const isRiskyConfig = tier === 0 && isRiskyTier0(params.request);
+      // Skip gate if caller provides an approved_plan_id (continuation from prior approval)
+      const isApproved = !!params.approved_plan_id;
+      const isRiskyConfig = isRiskyTier0(params.request); // evaluate independently of tier
 
-      if (mode === "ask" && (tier > 0 || isRiskyConfig)) {
-        const plan = buildPlan(params.request, tier > 0 ? tier : 1);
-        return {
-          content: [{
-            type: "text",
-            text: formatPlanForApproval(plan, route, mode),
-          }],
-        };
+      if (!isApproved) {
+        if (mode === "ask" && (tier > 0 || isRiskyConfig)) {
+          const plan = buildPlan(params.request, tier > 0 ? tier : 1);
+          return {
+            content: [{
+              type: "text",
+              text: formatPlanForApproval(plan, route, mode),
+            }],
+          };
+        }
+
+        if (isRiskyConfig && mode !== "autonomous") {
+          const plan = buildPlan(params.request, 1);
+          return {
+            content: [{
+              type: "text",
+              text: formatPlanForApproval(plan, route, mode),
+            }],
+          };
+        }
+
+        // Delegate mode + tier 2: show plan for confirmation
+        if (mode === "delegate" && tier === 2) {
+          const plan = buildPlan(params.request, tier);
+          return {
+            content: [{
+              type: "text",
+              text: formatPlanForApproval(plan, route, mode),
+            }],
+          };
+        }
       }
 
-      if (isRiskyConfig && mode !== "autonomous") {
-        return {
-          content: [{
-            type: "text",
-            text: [
-              `## Harness: Risky Config Change — Approval Required`,
-              ``,
-              `This request modifies sensitive config files (.env, plist, etc.).`,
-              `Even in Delegate mode, config changes require explicit approval.`,
-              ``,
-              `**Request:** ${params.request}`,
-              `**Workdir:** ${workdir}`,
-              ``,
-              `Approve to proceed, or modify the request.`,
-            ].join("\n"),
-          }],
-        };
-      }
-
-      // Tier 0: direct execution by the OpenClaw agent (no worker needed)
-      if (tier === 0) {
+      // Tier 0 (non-risky): direct execution by the OpenClaw agent
+      if (tier === 0 && !isRiskyConfig) {
         return {
           content: [{
             type: "text",
@@ -132,17 +142,6 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
               `**Workdir:** ${workdir}`,
               `**Route reason:** ${route.reason}`,
             ].join("\n"),
-          }],
-        };
-      }
-
-      // Delegate mode + tier 2: show plan for confirmation
-      if (mode === "delegate" && tier === 2) {
-        const plan = buildPlan(params.request, tier);
-        return {
-          content: [{
-            type: "text",
-            text: formatPlanForApproval(plan, route, mode),
           }],
         };
       }
@@ -200,9 +199,11 @@ async function executePlan(
   const budgetPerTask = maxBudgetUsd / plan.tasks.length;
 
   if (plan.mode === "parallel" && plan.tasks.length > 1) {
-    // Parallel with concurrency limit: cap at half of maxSessions
-    // to reserve slots for review/fix phases
-    const concurrencyLimit = Math.max(1, Math.floor(pluginConfig.maxSessions / 2));
+    // Parallel with concurrency limit based on actually available slots
+    // Reserve half for review/fix phases
+    const activeCount = sessionManager!.list("running").length + sessionManager!.list("starting").length;
+    const availableSlots = Math.max(1, pluginConfig.maxSessions - activeCount);
+    const concurrencyLimit = Math.max(1, Math.floor(availableSlots / 2));
     const promises: Promise<TaskExecutionResult>[] = [];
 
     // Execute in batches to avoid exhausting session slots
@@ -266,11 +267,11 @@ async function executeTask(
   // Budget: split across phases with a remaining counter
   // Initial worker gets 50%. Remaining 50% covers:
   //   1 initial review + maxLoops * (fix + rereview)
-  // Total review/fix phases = 1 + 2*maxLoops
-  const maxLoops = pluginConfig.maxReviewLoops;
+  // When maxLoops=0: only 1 review phase (no fix cycles)
+  const maxLoops = Math.max(0, pluginConfig.maxReviewLoops);
   const workerBudget = budgetUsd * 0.5;
   let remainingBudget = budgetUsd * 0.5;
-  const totalPhases = 1 + 2 * Math.max(maxLoops, 1); // initial review + (fix+rereview)*N
+  const totalPhases = maxLoops === 0 ? 1 : 1 + 2 * maxLoops;
   const perPhaseBudget = remainingBudget / totalPhases;
 
   try {
@@ -550,7 +551,9 @@ const RISKY_CONFIG_PATTERNS = [
   /openclaw\.json/i,
   /package\.json/i,
   /tsconfig/i,
+  /config\.ya?ml/i,
   /\.ya?ml\b.*\b(config|설정)/i,
+  /\b(settings|configuration)\.ya?ml/i,
   /docker(file|compose)/i,
   /nginx\.conf/i,
   /\.gitignore/i,
@@ -610,7 +613,12 @@ function formatPlanForApproval(
     );
   }
 
-  lines.push(``, `---`, `Approve this plan to proceed, or modify the request and re-run.`);
+  lines.push(
+    ``,
+    `---`,
+    `To approve, re-call with \`approved_plan_id: "${plan.id}"\`.`,
+    `Or modify the request and re-run.`,
+  );
   return lines.join("\n");
 }
 

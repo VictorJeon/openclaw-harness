@@ -74,7 +74,8 @@
       "maxReviewLoops": {
         "type": "number",
         "default": 4,
-        "description": "Maximum review-fix-rereview cycles before escalation"
+        "minimum": 0,
+        "description": "Maximum review-fix-rereview cycles before escalation (0 = single review, no fix cycles)"
       },
       "reviewModel": {
         "type": "string",
