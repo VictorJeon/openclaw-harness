@@ -108,6 +108,32 @@ export class SessionManager {
     return `${baseName}-${i}`;
   }
 
+  /**
+   * Number of currently available session slots.
+   */
+  availableSlots(): number {
+    const activeCount = [...this.sessions.values()].filter(
+      (s) => s.status === "starting" || s.status === "running",
+    ).length;
+    return Math.max(0, this.maxSessions - activeCount);
+  }
+
+  /**
+   * Wait until at least one session slot is available.
+   * Polls every 2 seconds, times out after 5 minutes.
+   */
+  async waitForSlot(): Promise<boolean> {
+    const maxWaitMs = 5 * 60 * 1000;
+    const pollMs = 2000;
+    const start = Date.now();
+
+    while (Date.now() - start < maxWaitMs) {
+      if (this.availableSlots() > 0) return true;
+      await new Promise<void>((r) => setTimeout(r, pollMs));
+    }
+    return false;
+  }
+
   spawn(config: SessionConfig): Session {
     const activeCount = [...this.sessions.values()].filter(
       (s) => s.status === "starting" || s.status === "running",

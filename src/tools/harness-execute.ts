@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { sessionManager, pluginConfig } from "../shared";
 import { classifyRequest } from "../router";
 import { buildPlan, searchMemory } from "../planner";
-import { initCheckpoint, updateTaskStatus, recordSession } from "../checkpoint";
+import { initCheckpoint, loadCheckpoint, updateTaskStatus, recordSession } from "../checkpoint";
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
 import type {
@@ -91,45 +91,66 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       console.log(`[harness] Route: tier=${tier}, confidence=${route.confidence}, reason=${route.reason}`);
 
       // Step 2: Approval gate
-      // Skip gate if caller provides an approved_plan_id (continuation from prior approval)
-      const isApproved = !!params.approved_plan_id;
       const isRiskyConfig = isRiskyTier0(params.request); // evaluate independently of tier
 
-      if (!isApproved) {
-        if (mode === "ask" && (tier > 0 || isRiskyConfig)) {
-          const plan = buildPlan(params.request, tier > 0 ? tier : 1);
+      // If approved_plan_id provided, load and validate the persisted plan
+      if (params.approved_plan_id) {
+        const existingCheckpoint = loadCheckpoint(params.approved_plan_id, workdir);
+        if (!existingCheckpoint) {
           return {
+            isError: true,
             content: [{
               type: "text",
-              text: formatPlanForApproval(plan, route, mode),
+              text: `Error: approved_plan_id "${params.approved_plan_id}" not found. It may have expired or the workdir doesn't match.`,
             }],
           };
         }
 
-        if (isRiskyConfig && mode !== "autonomous") {
-          const plan = buildPlan(params.request, 1);
+        // Verify the approved plan matches the current request
+        if (existingCheckpoint.plan.originalRequest !== params.request) {
           return {
+            isError: true,
             content: [{
               type: "text",
-              text: formatPlanForApproval(plan, route, mode),
+              text: `Error: approved_plan_id "${params.approved_plan_id}" was created for a different request. Cannot reuse approval across different requests.`,
             }],
           };
         }
 
-        // Delegate mode + tier 2: show plan for confirmation
-        if (mode === "delegate" && tier === 2) {
-          const plan = buildPlan(params.request, tier);
-          return {
-            content: [{
-              type: "text",
-              text: formatPlanForApproval(plan, route, mode),
-            }],
-          };
-        }
+        // Execute the approved plan directly
+        console.log(`[harness] Executing approved plan: ${params.approved_plan_id}`);
+        const plan = existingCheckpoint.plan;
+        const taskResults = await executePlan(plan, workdir, maxBudgetUsd, ctx, existingCheckpoint);
+
+        return {
+          content: [{
+            type: "text",
+            text: formatFinalResult(plan, route, taskResults, mode, existingCheckpoint),
+          }],
+        };
+      }
+
+      // No approval token — check gates
+      const needsApproval =
+        (mode === "ask" && (tier > 0 || isRiskyConfig)) ||
+        (isRiskyConfig && mode !== "autonomous") ||
+        (mode === "delegate" && tier === 2);
+
+      if (needsApproval) {
+        const plan = buildPlan(params.request, tier > 0 ? tier : 1);
+        // Persist the plan so approved_plan_id can load it later
+        const checkpoint = initCheckpoint(plan, workdir);
+        checkpoint.status = "running"; // mark as awaiting approval
+        return {
+          content: [{
+            type: "text",
+            text: formatPlanForApproval(plan, route, mode),
+          }],
+        };
       }
 
       // Tier 0 (non-risky): direct execution by the OpenClaw agent
-      if (tier === 0 && !isRiskyConfig) {
+      if (tier === 0) {
         return {
           content: [{
             type: "text",
@@ -199,22 +220,41 @@ async function executePlan(
   const budgetPerTask = maxBudgetUsd / plan.tasks.length;
 
   if (plan.mode === "parallel" && plan.tasks.length > 1) {
-    // Parallel with concurrency limit based on actually available slots
-    // Reserve half for review/fix phases
-    const activeCount = sessionManager!.list("running").length + sessionManager!.list("starting").length;
-    const availableSlots = Math.max(1, pluginConfig.maxSessions - activeCount);
-    const concurrencyLimit = Math.max(1, Math.floor(availableSlots / 2));
+    // Parallel with concurrency limit based on runtime available slots
+    // Reserve half for review/fix phases, recompute before each batch
     const promises: Promise<TaskExecutionResult>[] = [];
 
-    // Execute in batches to avoid exhausting session slots
-    for (let i = 0; i < plan.tasks.length; i += concurrencyLimit) {
-      const batch = plan.tasks.slice(i, i + concurrencyLimit);
+    let i = 0;
+    while (i < plan.tasks.length) {
+      // Wait for at least one slot before spawning
+      const hasSlot = await sessionManager!.waitForSlot();
+      if (!hasSlot) {
+        // Timeout — push remaining as errors
+        for (let j = i; j < plan.tasks.length; j++) {
+          promises.push(Promise.resolve({
+            taskId: plan.tasks[j].id,
+            workerSessionId: "",
+            workerResult: null,
+            reviewPassed: false,
+            reviewLoops: 0,
+            escalated: true,
+            error: "No session slots available (timeout)",
+          }));
+        }
+        break;
+      }
+
+      // Compute batch size from current availability (reserve half for review/fix)
+      const batchSize = Math.max(1, Math.floor(sessionManager!.availableSlots() / 2));
+      const batch = plan.tasks.slice(i, i + batchSize);
       const batchPromises = batch.map((task) =>
         executeTask(task, plan, workdir, budgetPerTask, ctx, checkpoint),
       );
       promises.push(...batchPromises);
-      // Wait for batch to complete before starting next
-      if (i + concurrencyLimit < plan.tasks.length) {
+      i += batch.length;
+
+      // Wait for batch to complete before next batch
+      if (i < plan.tasks.length) {
         await Promise.allSettled(batchPromises);
       }
     }
