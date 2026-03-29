@@ -2,7 +2,7 @@ import { sessionManager, resolveOriginChannel } from "../shared";
 
 export function registerClaudeBgCommand(api: any): void {
   api.registerCommand({
-    name: "claude_bg",
+    name: "harness_bg",
     description: "Send the current foreground session back to background",
     acceptsArgs: true,
     requireAuth: true,

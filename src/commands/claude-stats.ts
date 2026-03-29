@@ -2,7 +2,7 @@ import { sessionManager, formatStats } from "../shared";
 
 export function registerClaudeStatsCommand(api: any): void {
   api.registerCommand({
-    name: "claude_stats",
+    name: "harness_stats",
     description: "Show Claude Code Plugin usage metrics",
     acceptsArgs: false,
     requireAuth: true,

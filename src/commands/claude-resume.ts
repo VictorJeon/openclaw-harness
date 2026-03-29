@@ -2,7 +2,7 @@ import { sessionManager, resolveOriginChannel, formatDuration } from "../shared"
 
 export function registerClaudeResumeCommand(api: any): void {
   api.registerCommand({
-    name: "claude_resume",
+    name: "harness_resume",
     description:
       "Resume a previous Claude Code session. Usage: /claude_resume <id-or-name> [prompt] or /claude_resume --list to see resumable sessions.",
     acceptsArgs: true,

@@ -22,7 +22,7 @@ export function makeClaudeRespondTool(ctx?: OpenClawPluginToolContext) {
   }
 
   return {
-    name: "claude_respond",
+    name: "harness_respond",
     description:
       "Send a follow-up message to a running Claude Code session. The session must be running. Sessions are multi-turn by default, so this works with any session unless it was launched with multi_turn_disabled: true.",
     parameters: Type.Object({

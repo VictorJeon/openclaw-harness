@@ -1,0 +1,158 @@
+import type { Tier } from "./types";
+
+/**
+ * Router: classify incoming request complexity into tier 0/1/2.
+ *
+ * Tier 0: Config/docs/simple patches — OpenClaw agent handles directly
+ * Tier 1: Simple-to-medium coding — ACP Worker + Review loop
+ * Tier 2: Complex/multi-task — Plan → Approve → Worker + Review loop
+ *
+ * Classification: 3-layer cascade (Citadel-inspired)
+ *   1. Pattern match (0 tokens): regex for config/doc changes → tier 0
+ *   2. Keyword (~0 tokens): "refactoring", "new feature", "bug fix" → tier 1
+ *   3. LLM classification (~500 tokens): ambiguous → tier 2
+ */
+
+// Tier 0 patterns: settings, docs, trivial patches
+const TIER0_PATTERNS = [
+  /\b(설정|config|setting|환경)\s*(변경|수정|바꿔|업데이트)/i,
+  /\b(오타|typo|오탈자)\s*(수정|고쳐|fix)/i,
+  /\b(문서|doc|readme|changelog)\s*(수정|추가|업데이트|작성)/i,
+  /\b(버전|version)\s*(올려|bump|업데이트)/i,
+  /\bpackage\.json\b.*\b(수정|업데이트)\b/i,
+  /\b\.env\b.*\b(수정|추가)\b/i,
+  /\btsconfig\b/i,
+  /\b(단순|간단)\s*(패치|수정)\b/i,
+];
+
+// Tier 1 keywords: straightforward coding tasks
+const TIER1_KEYWORDS = [
+  "버그", "bug", "fix", "고쳐", "수정",
+  "새 기능", "new feature", "기능 추가", "추가해",
+  "리팩토링", "refactor",
+  "테스트", "test", "spec",
+  "엔드포인트", "endpoint", "api",
+  "컴포넌트", "component",
+  "함수", "function",
+  "스타일", "css", "style",
+  "유효성", "validation",
+];
+
+// Tier 2 keywords: complex, multi-part tasks
+const TIER2_KEYWORDS = [
+  "마이그레이션", "migration", "migrate",
+  "재작성", "rewrite", "재구현",
+  "아키텍처", "architecture",
+  "전환", "convert", "전체",
+  "시스템", "system", "인프라",
+  "복합", "통합", "integration",
+  "여러 파일", "multiple files",
+  "대규모", "large scale",
+];
+
+export interface RouteResult {
+  tier: Tier;
+  confidence: "pattern" | "keyword" | "llm";
+  reason: string;
+}
+
+export function classifyRequest(request: string): RouteResult {
+  const normalized = request.toLowerCase().trim();
+
+  // Layer 1: Pattern match → tier 0
+  for (const pattern of TIER0_PATTERNS) {
+    if (pattern.test(request)) {
+      return {
+        tier: 0,
+        confidence: "pattern",
+        reason: `Pattern match: ${pattern.source}`,
+      };
+    }
+  }
+
+  // Layer 2: Keyword scoring
+  let tier1Score = 0;
+  let tier2Score = 0;
+  const matchedKeywords: string[] = [];
+
+  for (const kw of TIER2_KEYWORDS) {
+    if (normalized.includes(kw.toLowerCase())) {
+      tier2Score++;
+      matchedKeywords.push(kw);
+    }
+  }
+
+  for (const kw of TIER1_KEYWORDS) {
+    if (normalized.includes(kw.toLowerCase())) {
+      tier1Score++;
+      matchedKeywords.push(kw);
+    }
+  }
+
+  // Heuristic: count commas/tasks as complexity signal
+  const taskCount = countTasks(request);
+
+  if (tier2Score >= 2 || taskCount >= 4) {
+    return {
+      tier: 2,
+      confidence: "keyword",
+      reason: `Tier 2 keywords: [${matchedKeywords.join(", ")}], tasks: ${taskCount}`,
+    };
+  }
+
+  if (tier1Score >= 1) {
+    return {
+      tier: taskCount >= 2 ? 2 : 1,
+      confidence: "keyword",
+      reason: `Tier 1 keywords: [${matchedKeywords.join(", ")}], tasks: ${taskCount}`,
+    };
+  }
+
+  if (taskCount >= 2) {
+    return {
+      tier: taskCount >= 4 ? 2 : 1,
+      confidence: "keyword",
+      reason: `Multiple tasks detected: ${taskCount}`,
+    };
+  }
+
+  // Layer 3: Ambiguous — no keywords, no multi-task signals
+  // Long requests or complex phrasing → tier 2, else default tier 1
+  if (normalized.length > 200) {
+    return {
+      tier: 2,
+      confidence: "llm",
+      reason: `Long ambiguous request (${normalized.length} chars), needs LLM classification`,
+    };
+  }
+
+  return {
+    tier: 1,
+    confidence: "llm",
+    reason: "No strong signals — default tier 1, LLM classification recommended",
+  };
+}
+
+/**
+ * Count the number of distinct tasks/work items in a request.
+ * Looks for numbered lists, commas with verbs, "and" conjunctions, etc.
+ */
+function countTasks(request: string): number {
+  // Count numbered items (1. 2. 3. or 1) 2) 3))
+  const numbered = request.match(/(?:^|\n)\s*\d+[.)]/g);
+  if (numbered && numbered.length >= 2) return numbered.length;
+
+  // Count bullet points
+  const bullets = request.match(/(?:^|\n)\s*[-•*]\s+/g);
+  if (bullets && bullets.length >= 2) return bullets.length;
+
+  // Count "하고" / "and" / comma-separated verb phrases
+  const conjunctions = request.match(/[,，]\s*(?:그리고|하고|and|also|또)/gi);
+  if (conjunctions) return conjunctions.length + 1;
+
+  // Simple comma-separated task detection
+  const commaSegments = request.split(/[,，]/).filter((s) => s.trim().length > 10);
+  if (commaSegments.length >= 3) return commaSegments.length;
+
+  return 0;
+}

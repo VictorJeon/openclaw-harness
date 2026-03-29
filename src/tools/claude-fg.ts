@@ -23,7 +23,7 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
   console.log(`[claude-fg] Factory context: messageChannel=${ctx?.messageChannel}, agentAccountId=${ctx?.agentAccountId}, workspaceDir=${ctx?.workspaceDir}, fallbackChannel=${fallbackChannel}`);
 
   return {
-    name: "claude_fg",
+    name: "harness_fg",
     description:
       "Bring a Claude Code session to foreground (by name or ID). Shows buffered output and streams new output.",
     parameters: Type.Object({

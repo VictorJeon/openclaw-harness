@@ -2,7 +2,7 @@ import { sessionManager, formatDuration, resolveOriginChannel } from "../shared"
 
 export function registerClaudeFgCommand(api: any): void {
   api.registerCommand({
-    name: "claude_fg",
+    name: "harness_fg",
     description: "Bring a Claude Code session to foreground by name or ID",
     acceptsArgs: true,
     requireAuth: true,

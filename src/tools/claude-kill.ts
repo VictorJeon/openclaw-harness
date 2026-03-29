@@ -4,7 +4,7 @@ import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeKillTool(ctx?: OpenClawPluginToolContext) {
   return {
-    name: "claude_kill",
+    name: "harness_kill",
     description: "Terminate a running Claude Code session by name or ID.",
     parameters: Type.Object({
       session: Type.String({ description: "Session name or ID to terminate" }),

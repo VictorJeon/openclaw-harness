@@ -1,8 +1,8 @@
 {
-  "id": "openclaw-claude-code-plugin",
-  "name": "OpenClaw Claude Code Plugin",
-  "description": "Orchestrate Claude Code sessions from OpenClaw",
-  "version": "1.0.3",
+  "id": "openclaw-harness",
+  "name": "OpenClaw Harness",
+  "description": "Plan-Work-Review loop for coding tasks. Routes requests by complexity, dispatches workers, cross-model review with gap detection.",
+  "version": "0.1.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -50,7 +50,7 @@
       },
       "agentChannels": {
         "type": "object",
-        "description": "Map of agent working directories to notification channels (e.g. { \"/path/to/workdir\": \"telegram:123\" })",
+        "description": "Map of agent working directories to notification channels",
         "additionalProperties": {
           "type": "string"
         }
@@ -58,12 +58,50 @@
       "maxAutoResponds": {
         "type": "number",
         "default": 10,
-        "description": "Maximum consecutive auto-responds (agent tool calls) per session before requiring user input via /claude-respond"
+        "description": "Maximum consecutive auto-responds per session before requiring user input"
       },
       "skipSafetyChecks": {
         "type": "boolean",
         "default": false,
-        "description": "Skip ALL pre-launch safety guards (autonomy skill, heartbeat, HEARTBEAT.md, agentChannels). Use only for development/testing."
+        "description": "Skip ALL pre-launch safety guards. Use only for development/testing."
+      },
+      "operationMode": {
+        "type": "string",
+        "default": "delegate",
+        "enum": ["ask", "delegate", "autonomous"],
+        "description": "Harness operation mode. ask=all approvals, delegate=auto safe ops, autonomous=fully auto"
+      },
+      "maxReviewLoops": {
+        "type": "number",
+        "default": 4,
+        "description": "Maximum review-fix-rereview cycles before escalation"
+      },
+      "reviewModel": {
+        "type": "string",
+        "description": "Model for cross-model review (defaults to codex). Should differ from worker model for blind-spot detection."
+      },
+      "workerModel": {
+        "type": "string",
+        "description": "Model for worker execution (defaults to claude). Used for tier 1 coding tasks."
+      },
+      "memoryV3Endpoint": {
+        "type": "string",
+        "description": "Memory V3 search endpoint (e.g. http://127.0.0.1:18790/v1/memory/search)"
+      },
+      "routerMaxTokens": {
+        "type": "number",
+        "default": 500,
+        "description": "Max tokens for Router tier classification"
+      },
+      "plannerMaxTokens": {
+        "type": "number",
+        "default": 2000,
+        "description": "Max tokens for Planner output"
+      },
+      "reviewerMaxTokens": {
+        "type": "number",
+        "default": 1000,
+        "description": "Max tokens per task for Reviewer output"
       }
     }
   }

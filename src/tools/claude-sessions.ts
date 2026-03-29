@@ -4,7 +4,7 @@ import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeSessionsTool(ctx?: OpenClawPluginToolContext) {
   return {
-    name: "claude_sessions",
+    name: "harness_sessions",
     description:
       "List all Claude Code sessions with their status and progress.",
     parameters: Type.Object({

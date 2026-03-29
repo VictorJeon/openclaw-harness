@@ -23,7 +23,7 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
   console.log(`[claude-bg] Factory context: messageChannel=${ctx?.messageChannel}, agentAccountId=${ctx?.agentAccountId}, workspaceDir=${ctx?.workspaceDir}, fallbackChannel=${fallbackChannel}`);
 
   return {
-    name: "claude_bg",
+    name: "harness_bg",
     description:
       "Send a Claude Code session back to background (stop streaming). If no session specified, detaches whichever session is currently in foreground.",
     parameters: Type.Object({

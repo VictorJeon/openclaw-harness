@@ -2,7 +2,7 @@ import { sessionManager } from "../shared";
 
 export function registerClaudeKillCommand(api: any): void {
   api.registerCommand({
-    name: "claude_kill",
+    name: "harness_kill",
     description: "Kill a Claude Code session by name or ID",
     acceptsArgs: true,
     requireAuth: true,

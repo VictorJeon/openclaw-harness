@@ -2,7 +2,7 @@ import { sessionManager } from "../shared";
 
 export function registerClaudeRespondCommand(api: any): void {
   api.registerCommand({
-    name: "claude_respond",
+    name: "harness_respond",
     description:
       "Send a follow-up message to a running Claude Code session. Usage: /claude_respond <id-or-name> <message>",
     acceptsArgs: true,

@@ -9,7 +9,7 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
   console.log(`[claude-launch] Factory ctx: agentId=${ctx.agentId}, workspaceDir=${ctx.workspaceDir}, messageChannel=${ctx.messageChannel}, agentAccountId=${ctx.agentAccountId}`);
 
   return {
-    name: "claude_launch",
+    name: "harness_launch",
     description:
       "Launch a Claude Code session in background to execute a development task. Sessions are multi-turn by default — they stay open for follow-up messages via claude_respond. Set multi_turn_disabled: true for fire-and-forget sessions. Supports resuming previous sessions. Returns a session ID and name for tracking.",
     parameters: Type.Object({

@@ -16,6 +16,11 @@ export let pluginConfig: PluginConfig = {
   idleTimeoutMinutes: 30,
   maxPersistedSessions: 50,
   maxAutoResponds: 10,
+  operationMode: "delegate",
+  maxReviewLoops: 4,
+  routerMaxTokens: 500,
+  plannerMaxTokens: 2000,
+  reviewerMaxTokens: 1000,
 };
 
 export function setPluginConfig(config: Partial<PluginConfig>): void {
@@ -43,8 +48,18 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     idleTimeoutMinutes: config.idleTimeoutMinutes ?? 30,
     maxPersistedSessions: config.maxPersistedSessions ?? 50,
     fallbackChannel: config.fallbackChannel,
+    permissionMode: config.permissionMode,
     agentChannels,
     maxAutoResponds: config.maxAutoResponds ?? 10,
+    skipSafetyChecks: config.skipSafetyChecks,
+    operationMode: (config as any).operationMode ?? "delegate",
+    maxReviewLoops: (config as any).maxReviewLoops ?? 4,
+    reviewModel: (config as any).reviewModel,
+    workerModel: (config as any).workerModel,
+    memoryV3Endpoint: (config as any).memoryV3Endpoint,
+    routerMaxTokens: (config as any).routerMaxTokens ?? 500,
+    plannerMaxTokens: (config as any).plannerMaxTokens ?? 2000,
+    reviewerMaxTokens: (config as any).reviewerMaxTokens ?? 1000,
   };
 }
 

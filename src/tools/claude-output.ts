@@ -4,7 +4,7 @@ import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeOutputTool(ctx?: OpenClawPluginToolContext) {
   return {
-    name: "claude_output",
+    name: "harness_output",
     description: "Show recent output from a Claude Code session (by name or ID).",
     parameters: Type.Object({
       session: Type.String({ description: "Session name or ID to get output from" }),

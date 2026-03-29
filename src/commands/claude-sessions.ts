@@ -2,7 +2,7 @@ import { sessionManager, formatSessionListing } from "../shared";
 
 export function registerClaudeSessionsCommand(api: any): void {
   api.registerCommand({
-    name: "claude_sessions",
+    name: "harness_sessions",
     description: "List all Claude Code sessions",
     acceptsArgs: false,
     requireAuth: true,

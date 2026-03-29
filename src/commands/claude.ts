@@ -2,7 +2,7 @@ import { sessionManager, pluginConfig, resolveOriginChannel } from "../shared";
 
 export function registerClaudeCommand(api: any): void {
   api.registerCommand({
-    name: "claude",
+    name: "harness",
     description: "Launch a Claude Code session. Usage: /claude [--name <name>] <prompt>",
     acceptsArgs: true,
     requireAuth: true,

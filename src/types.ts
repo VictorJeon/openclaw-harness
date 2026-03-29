@@ -93,28 +93,103 @@ export interface PluginConfig {
   maxPersistedSessions: number;
   fallbackChannel?: string;
   permissionMode?: PermissionMode;
-
-  /**
-   * Map of agent working directories to notification channels.
-   * When a tool call (e.g. claude_launch) cannot resolve the origin channel
-   * from context, it checks whether the agent workspace matches a key here
-   * and uses the mapped channel for notifications.
-   *
-   * Example: { "/home/user/my-seo-agent": "telegram|123456789" }
-   */
   agentChannels?: Record<string, string>;
-
-  /**
-   * Maximum number of consecutive auto-responds (agent-initiated claude_respond
-   * tool calls) before requiring user input. Resets when the user sends a
-   * message via the /claude_respond command. Default: 10.
-   */
   maxAutoResponds: number;
-
-  /**
-   * Skip ALL pre-launch safety guards (autonomy skill, heartbeat config,
-   * HEARTBEAT.md, agentChannels mapping). Useful for development/testing.
-   * Default: false.
-   */
   skipSafetyChecks?: boolean;
+
+  // Harness-specific config
+  operationMode: OperationMode;
+  maxReviewLoops: number;
+  reviewModel?: string;
+  workerModel?: string;
+  memoryV3Endpoint?: string;
+  routerMaxTokens: number;
+  plannerMaxTokens: number;
+  reviewerMaxTokens: number;
+}
+
+// --- Harness types ---
+
+export type OperationMode = "ask" | "delegate" | "autonomous";
+
+export type Tier = 0 | 1 | 2;
+
+export type GapType =
+  | "assumption_injection"
+  | "scope_creep"
+  | "direction_drift"
+  | "missing_core"
+  | "over_engineering";
+
+export type TaskStatus = "pending" | "in-progress" | "completed" | "in-review" | "failed";
+
+export interface TaskSpec {
+  id: string;
+  title: string;
+  scope: string;
+  acceptanceCriteria: string[];
+  agent: "codex" | "claude";
+}
+
+export interface HarnessPlan {
+  id: string;
+  originalRequest: string;
+  tasks: TaskSpec[];
+  mode: "solo" | "parallel" | "sequential";
+  estimatedComplexity: "low" | "medium" | "high";
+  tier: Tier;
+}
+
+export interface WorkerResult {
+  taskId: string;
+  status: "completed" | "failed";
+  summary: string;
+  filesChanged: string[];
+  testsRun: number;
+  warnings: string[];
+  sessionId?: string;
+}
+
+export interface ReviewGap {
+  type: GapType;
+  evidence: string;
+  fixHint: string;
+}
+
+export interface ReviewResult {
+  taskId: string;
+  result: "pass" | "fail";
+  gaps: ReviewGap[];
+  rerunNeeded: boolean;
+}
+
+export interface CheckpointData {
+  runId: string;
+  status: "running" | "complete" | "failed" | "escalated";
+  plan: HarnessPlan;
+  tasks: Array<{
+    id: string;
+    status: TaskStatus;
+    reviewPassed?: boolean;
+    reviewLoop?: number;
+    workerResult?: WorkerResult;
+    reviewResult?: ReviewResult;
+  }>;
+  sessions: Record<string, { worker?: string; reviewer?: string }>;
+  lastUpdated: string;
+}
+
+export interface HarnessRunResult {
+  runId: string;
+  status: "success" | "partial" | "failed" | "escalated";
+  plan: HarnessPlan;
+  tasks: Array<{
+    id: string;
+    status: TaskStatus;
+    workerResult?: WorkerResult;
+    reviewResult?: ReviewResult;
+  }>;
+  summary: string;
+  totalReviewLoops: number;
+  escalationReason?: string;
 }

@@ -1,6 +1,6 @@
 {
-  "name": "@betrue/openclaw-claude-code-plugin",
-  "version": "1.0.12",
+  "name": "@openclaw/harness",
+  "version": "0.1.0",
   "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
@@ -53,5 +53,5 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "An OpenClaw plugin that orchestrates Claude Code sessions as managed background processes. Launch, monitor, and control Claude coding agents directly from your AI gateway."
+  "description": "OpenClaw Harness: Plan-Work-Review loop for coding tasks with cross-model review and gap detection."
 }

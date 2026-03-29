@@ -4,7 +4,7 @@ import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeStatsTool(_ctx?: OpenClawPluginToolContext) {
   return {
-    name: "claude_stats",
+    name: "harness_stats",
     description:
       "Show Claude Code Plugin usage metrics: session counts by status, average duration, and notable sessions.",
     parameters: Type.Object({}),
