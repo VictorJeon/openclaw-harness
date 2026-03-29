@@ -328,7 +328,9 @@ async function executeTask(
     if (useSubagent) {
       // === ACP/Subagent path: real cross-model ===
       const workerKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}`;
+      const workerIdempotencyKey = `harness-worker-${plan.id}-${task.id}-${Date.now()}`;
       const workerRunParams = {
+        idempotencyKey: workerIdempotencyKey,
         sessionKey: workerKey,
         message: [
           `## Working Directory`,
@@ -427,10 +429,10 @@ async function executeTask(
           const reviewKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`;
           console.log(`[harness] Reviewer via subagent.run: key=${reviewKey}, model=${reviewModel}`);
           const { runId: reviewRunId } = await runtime.subagent.run({
-            idempotencyKey: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
+            idempotencyKey: `harness-review-${plan.id}-${task.id}-${reviewLoop.history.length + 1}-${Date.now()}`,
             sessionKey: reviewKey,
             message: REVIEWER_SYSTEM_PROMPT + "\n\n---\n\n" + reviewPrompt,
-            provider: reviewModel === "codex" ? "openai" : "anthropic",
+            provider: reviewModel === "codex" ? "openai-codex" : "anthropic",
             model: reviewModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
             deliver: false,
           });
@@ -540,10 +542,10 @@ async function executeTask(
           const fixKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`;
           console.log(`[harness] Fixer via subagent.run: key=${fixKey}, model=${workerModel}`);
           const { runId: fixRunId } = await runtime.subagent.run({
-            idempotencyKey: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
+            idempotencyKey: `harness-fix-${plan.id}-${task.id}-${reviewLoop.currentLoop}-${Date.now()}`,
             sessionKey: fixKey,
             message: `## Working Directory\nAll file operations MUST use absolute paths under: ${workdir}\nCreate the directory first if it doesn't exist: mkdir -p ${workdir}\n\n${action.fixPrompt}`,
-            provider: workerModel === "codex" ? "openai" : "anthropic",
+            provider: workerModel === "codex" ? "openai-codex" : "anthropic",
             model: workerModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
             deliver: false,
           });
