@@ -330,6 +330,7 @@ async function executeTask(
       const workerKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}`;
       console.log(`[harness] Worker via subagent.run: key=${workerKey}, model=${workerModel}`);
       const { runId } = await runtime.subagent.run({
+        idempotencyKey: `harness-${plan.id}-${task.id}-worker`,
         sessionKey: workerKey,
         message: `Working directory: ${workdir}\n\n${workerPrompt}`,
         provider: workerModel === "codex" ? "openai" : "anthropic",
@@ -337,10 +338,20 @@ async function executeTask(
         deliver: false,
       });
       workerSessionId = workerKey;
+      console.log(`[harness] Worker subagent.run returned runId=${runId}`);
       const completion = await runtime.subagent.waitForRun({ runId, timeoutMs: 600000 });
+      console.log(`[harness] Worker waitForRun result: status=${completion?.status}, error=${completion?.error}`);
+      if (completion?.status === "error") {
+        throw new Error(`Worker subagent failed: ${completion.error ?? "unknown"}`);
+      }
       // Extract result from subagent messages
       const msgs = await runtime.subagent.getSessionMessages({ sessionKey: workerKey, limit: 5 });
-      const lastMsg = msgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+      console.log(`[harness] Worker getSessionMessages: count=${msgs?.messages?.length ?? 0}`);
+      const assistantMsgs = msgs?.messages?.filter((m: any) => m.role === "assistant") ?? [];
+      const lastAssistant = assistantMsgs.length > 0 ? assistantMsgs[assistantMsgs.length - 1] : null;
+      const rawContent = lastAssistant?.content ?? "";
+      console.log(`[harness] Worker rawContent type=${typeof rawContent}, isArray=${Array.isArray(rawContent)}`);
+      const lastMsg = typeof rawContent === "string" ? rawContent : Array.isArray(rawContent) ? rawContent.map((c: any) => typeof c === "string" ? c : c?.text ?? c?.content ?? "").join("\n") : String(rawContent);
       workerResult = parseWorkerOutput(lastMsg, task.id);
       // Cleanup
       try { await runtime.subagent.deleteSession({ sessionKey: workerKey }); } catch {}
@@ -410,6 +421,7 @@ async function executeTask(
           const reviewKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`;
           console.log(`[harness] Reviewer via subagent.run: key=${reviewKey}, model=${reviewModel}`);
           const { runId: reviewRunId } = await runtime.subagent.run({
+            idempotencyKey: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
             sessionKey: reviewKey,
             message: REVIEWER_SYSTEM_PROMPT + "\n\n---\n\n" + reviewPrompt,
             provider: reviewModel === "codex" ? "openai" : "anthropic",
@@ -419,7 +431,8 @@ async function executeTask(
           recordSession(checkpoint, task.id, "reviewer", reviewKey, workdir);
           await runtime.subagent.waitForRun({ runId: reviewRunId, timeoutMs: 300000 });
           const reviewMsgs = await runtime.subagent.getSessionMessages({ sessionKey: reviewKey, limit: 5 });
-          reviewOutput = reviewMsgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+          const rawReviewContent = reviewMsgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+          reviewOutput = typeof rawReviewContent === "string" ? rawReviewContent : Array.isArray(rawReviewContent) ? rawReviewContent.map((c: any) => c.text ?? c.content ?? "").join("\n") : String(rawReviewContent);
           try { await runtime.subagent.deleteSession({ sessionKey: reviewKey }); } catch {}
         } else {
           // === Fallback: sessionManager.spawn ===
@@ -521,6 +534,7 @@ async function executeTask(
           const fixKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`;
           console.log(`[harness] Fixer via subagent.run: key=${fixKey}, model=${workerModel}`);
           const { runId: fixRunId } = await runtime.subagent.run({
+            idempotencyKey: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
             sessionKey: fixKey,
             message: `Working directory: ${workdir}\n\n${action.fixPrompt}`,
             provider: workerModel === "codex" ? "openai" : "anthropic",
@@ -529,7 +543,8 @@ async function executeTask(
           });
           await runtime.subagent.waitForRun({ runId: fixRunId, timeoutMs: 600000 });
           const fixMsgs = await runtime.subagent.getSessionMessages({ sessionKey: fixKey, limit: 5 });
-          const fixText = fixMsgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+          const rawFixContent = fixMsgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
+          const fixText = typeof rawFixContent === "string" ? rawFixContent : Array.isArray(rawFixContent) ? rawFixContent.map((c: any) => c.text ?? c.content ?? "").join("\n") : String(rawFixContent);
           const fixResult = parseWorkerOutput(fixText, task.id);
           if (fixResult) {
             currentWorkerResult = fixResult;
@@ -580,7 +595,7 @@ async function executeTask(
       reviewPassed: false,
       reviewLoops: 0,
       escalated: true,
-      error: err.message,
+      error: `${err.message}\n${err.stack ?? ""}`,
     };
   }
 }
