@@ -328,15 +328,21 @@ async function executeTask(
     if (useSubagent) {
       // === ACP/Subagent path: real cross-model ===
       const workerKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}`;
-      console.log(`[harness] Worker via subagent.run: key=${workerKey}, model=${workerModel}`);
-      const { runId } = await runtime.subagent.run({
-        idempotencyKey: `harness-${plan.id}-${task.id}-worker`,
+      const workerRunParams = {
         sessionKey: workerKey,
-        message: `Working directory: ${workdir}\n\n${workerPrompt}`,
-        provider: workerModel === "codex" ? "openai" : "anthropic",
+        message: [
+          `## Working Directory`,
+          `All file operations MUST use absolute paths under: ${workdir}`,
+          `Create the directory first if it doesn't exist: mkdir -p ${workdir}`,
+          ``,
+          workerPrompt,
+        ].join("\n"),
+        provider: workerModel === "codex" ? "openai-codex" : "anthropic",
         model: workerModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
         deliver: false,
-      });
+      };
+      console.log(`[harness] Worker subagent.run params: ${JSON.stringify(workerRunParams)}`);
+      const { runId } = await runtime.subagent.run(workerRunParams);
       workerSessionId = workerKey;
       console.log(`[harness] Worker subagent.run returned runId=${runId}`);
       const completion = await runtime.subagent.waitForRun({ runId, timeoutMs: 600000 });
@@ -536,7 +542,7 @@ async function executeTask(
           const { runId: fixRunId } = await runtime.subagent.run({
             idempotencyKey: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
             sessionKey: fixKey,
-            message: `Working directory: ${workdir}\n\n${action.fixPrompt}`,
+            message: `## Working Directory\nAll file operations MUST use absolute paths under: ${workdir}\nCreate the directory first if it doesn't exist: mkdir -p ${workdir}\n\n${action.fixPrompt}`,
             provider: workerModel === "codex" ? "openai" : "anthropic",
             model: workerModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
             deliver: false,
