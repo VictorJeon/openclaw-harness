@@ -230,16 +230,31 @@ function decomposeTasks(request: string): TaskSpec[] {
 }
 
 function canParallelize(tasks: TaskSpec[]): boolean {
-  // Simple heuristic: if tasks mention different files/areas, they can run in parallel
-  // For now, default to parallel for 2+ independent tasks
   if (tasks.length <= 1) return false;
 
-  // Check for explicit dependencies ("after", "then", "다음에")
+  // Check for explicit dependencies
   for (const task of tasks) {
     if (/\b(after|then|다음에|이후에|완료\s*후)\b/i.test(task.scope)) {
       return false;
     }
   }
 
+  // Check for overlapping file paths in scopes — if any two tasks
+  // mention the same file, they must run sequentially
+  const filesByTask = tasks.map((t) => extractScopeFiles(t.scope));
+  for (let i = 0; i < filesByTask.length; i++) {
+    for (let j = i + 1; j < filesByTask.length; j++) {
+      const overlap = filesByTask[i].filter((f) => filesByTask[j].includes(f));
+      if (overlap.length > 0) {
+        return false;
+      }
+    }
+  }
+
   return true;
+}
+
+function extractScopeFiles(scope: string): string[] {
+  const matches = scope.match(/[\w\-./]+\.\w{1,5}/g);
+  return matches ? [...new Set(matches)] : [];
 }

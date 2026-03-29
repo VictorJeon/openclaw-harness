@@ -85,15 +85,35 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       console.log(`[harness] Route: tier=${tier}, confidence=${route.confidence}, reason=${route.reason}`);
 
       // Step 2: Approval gate
-      // Ask mode: require approval for everything except tier 0
-      // Delegate mode: require approval for risky ops (tier 2 or config changes)
-      if (mode === "ask" && tier > 0) {
-        // Build plan first so user can see what will be executed
-        const plan = buildPlan(params.request, tier);
+      // Ask mode: require approval for everything except safe tier 0
+      // Delegate mode: require approval for risky ops (tier 2 or risky config)
+      const isRiskyConfig = tier === 0 && isRiskyTier0(params.request);
+
+      if (mode === "ask" && (tier > 0 || isRiskyConfig)) {
+        const plan = buildPlan(params.request, tier > 0 ? tier : 1);
         return {
           content: [{
             type: "text",
             text: formatPlanForApproval(plan, route, mode),
+          }],
+        };
+      }
+
+      if (isRiskyConfig && mode !== "autonomous") {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `## Harness: Risky Config Change — Approval Required`,
+              ``,
+              `This request modifies sensitive config files (.env, plist, etc.).`,
+              `Even in Delegate mode, config changes require explicit approval.`,
+              ``,
+              `**Request:** ${params.request}`,
+              `**Workdir:** ${workdir}`,
+              ``,
+              `Approve to proceed, or modify the request.`,
+            ].join("\n"),
           }],
         };
       }
@@ -206,8 +226,8 @@ async function executePlan(
       const result = await executeTask(task, plan, workdir, budgetPerTask, ctx, checkpoint);
       results.push(result);
 
-      // If a sequential task fails, stop
-      if (plan.mode === "sequential" && !result.reviewPassed && !result.escalated) {
+      // If a sequential task didn't pass, stop the chain
+      if (plan.mode === "sequential" && !result.reviewPassed) {
         break;
       }
     }
@@ -229,6 +249,14 @@ async function executeTask(
     ? (pluginConfig.workerModel || pluginConfig.defaultModel)
     : (pluginConfig.defaultModel || pluginConfig.workerModel);
 
+  // Budget: split across phases with a remaining counter
+  // Initial worker gets 50%, rest is shared among review/fix cycles
+  const maxLoops = pluginConfig.maxReviewLoops;
+  const workerBudget = budgetUsd * 0.5;
+  const reviewFixBudget = budgetUsd * 0.5;
+  const perCycleBudget = reviewFixBudget / Math.max(maxLoops, 1);
+  let remainingBudget = reviewFixBudget;
+
   try {
     // --- Worker phase: single-turn session ---
     updateTaskStatus(checkpoint, task.id, "in-progress", workdir);
@@ -239,7 +267,7 @@ async function executeTask(
       name: `harness-${plan.id}-${task.id}`,
       workdir,
       model: workerModel,
-      maxBudgetUsd: budgetUsd * 0.6, // 60% for worker, 40% for review cycles
+      maxBudgetUsd: workerBudget,
       permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
       originChannel: ctx.messageChannel,
       originAgentId: ctx.agentId,
@@ -280,9 +308,10 @@ async function executeTask(
         name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
         workdir,
         model: reviewModel,
-        maxBudgetUsd: budgetUsd * 0.1, // 10% per review
+        maxBudgetUsd: Math.min(perCycleBudget * 0.4, remainingBudget * 0.4), // review portion of cycle
         systemPrompt: REVIEWER_SYSTEM_PROMPT,
-        permissionMode: "bypassPermissions",
+        permissionMode: "default", // Restrictive: no bypass
+        allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
         originChannel: ctx.messageChannel,
         originAgentId: ctx.agentId,
         multiTurn: false,
@@ -333,12 +362,15 @@ async function executeTask(
 
       // action === "fix": spawn a fixer session with gap feedback
       if (action.action === "fix") {
+        const fixBudget = Math.min(perCycleBudget * 0.6, remainingBudget * 0.6);
+        remainingBudget -= perCycleBudget;
+
         const fixSession = sessionManager!.spawn({
           prompt: action.fixPrompt,
           name: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
           workdir,
-          model: workerModel, // Same model as original worker
-          maxBudgetUsd: budgetUsd * 0.1,
+          model: workerModel,
+          maxBudgetUsd: fixBudget,
           permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
           originChannel: ctx.messageChannel,
           originAgentId: ctx.agentId,
@@ -381,48 +413,79 @@ async function executeTask(
 
 // --- Session completion helpers ---
 
-/**
- * Wait for a session to reach terminal state and extract a WorkerResult.
- */
-async function waitForCompletion(sessionId: string, taskId: string): Promise<WorkerResult | null> {
-  const output = await waitForOutput(sessionId);
-  if (!output) return null;
-
-  // Parse worker output into structured result
-  // Workers are instructed to summarize: files changed, tests run, warnings
-  return {
-    taskId,
-    status: "completed",
-    summary: output.length > 500 ? output.slice(-500) : output,
-    filesChanged: extractFilePaths(output),
-    testsRun: extractTestCount(output),
-    warnings: extractWarnings(output),
-    sessionId,
-  };
+interface SessionCompletion {
+  status: "completed" | "failed" | "killed" | "timeout";
+  output: string;
+  error?: string;
 }
 
 /**
- * Wait for a session to complete and return its full output.
- * Polls session status until terminal state.
+ * Wait for a session to reach terminal state and return status + output.
  */
-async function waitForOutput(sessionId: string): Promise<string> {
+async function waitForSessionEnd(sessionId: string): Promise<SessionCompletion> {
   const maxWaitMs = 10 * 60 * 1000; // 10 minutes max
   const pollIntervalMs = 3000;
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWaitMs) {
     const session = sessionManager!.get(sessionId);
-    if (!session) return "";
+    if (!session) {
+      return { status: "failed", output: "", error: "Session disappeared" };
+    }
 
     if (session.status === "completed" || session.status === "failed" || session.status === "killed") {
-      return session.getOutput().join("\n");
+      return {
+        status: session.status,
+        output: session.getOutput().join("\n"),
+        error: session.error,
+      };
     }
 
     await sleep(pollIntervalMs);
   }
 
   console.warn(`[harness] Timeout waiting for session ${sessionId}`);
-  return "";
+  // Kill the timed-out session
+  sessionManager!.kill(sessionId);
+  return { status: "timeout", output: "", error: "Session timed out after 10 minutes" };
+}
+
+/**
+ * Wait for a session to complete successfully and extract a WorkerResult.
+ * Returns null if the session failed, was killed, or timed out.
+ */
+async function waitForCompletion(sessionId: string, taskId: string): Promise<WorkerResult | null> {
+  const completion = await waitForSessionEnd(sessionId);
+
+  if (completion.status !== "completed") {
+    console.warn(`[harness] Worker session ${sessionId} ended with status=${completion.status}: ${completion.error}`);
+    return null;
+  }
+
+  if (!completion.output) return null;
+
+  return {
+    taskId,
+    status: "completed",
+    summary: completion.output.length > 500 ? completion.output.slice(-500) : completion.output,
+    filesChanged: extractFilePaths(completion.output),
+    testsRun: extractTestCount(completion.output),
+    warnings: extractWarnings(completion.output),
+    sessionId,
+  };
+}
+
+/**
+ * Wait for a session to complete and return its output (for reviewer).
+ * Returns empty string on failure.
+ */
+async function waitForOutput(sessionId: string): Promise<string> {
+  const completion = await waitForSessionEnd(sessionId);
+  if (completion.status !== "completed") {
+    console.warn(`[harness] Session ${sessionId} ended with status=${completion.status}: ${completion.error}`);
+    return "";
+  }
+  return completion.output;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -454,6 +517,22 @@ function extractWarnings(output: string): string[] {
     }
   }
   return warnings.slice(0, 10); // cap at 10
+}
+
+// --- Risk detection ---
+
+const RISKY_CONFIG_PATTERNS = [
+  /\.env\b/i,
+  /\.plist\b/i,
+  /credentials/i,
+  /secrets?\b/i,
+  /\bapi[_-]?key/i,
+  /\btoken\b.*\b(수정|변경|update|change|set)\b/i,
+  /openclaw\.json/i,
+];
+
+function isRiskyTier0(request: string): boolean {
+  return RISKY_CONFIG_PATTERNS.some((p) => p.test(request));
 }
 
 // --- Prompt builders ---
