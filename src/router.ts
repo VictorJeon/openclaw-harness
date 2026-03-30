@@ -23,19 +23,35 @@ const TIER0_PATTERNS = [
   /\b\.env\b.*\b(수정|추가)\b/i,
   /\btsconfig\b/i,
   /\b(단순|간단)\s*(패치|수정)\b/i,
+  // Agent/workspace files
+  /\b(AGENTS|MEMORY|SOUL|USER|TOOLS|IDENTITY|HEARTBEAT|BOOTSTRAP)\.md\b/i,
+  // Simple line edits
+  /\b(한 줄|한줄|one line|1줄)\s*(추가|수정|삭제|변경)/i,
+  /\b(주석|코멘트|comment)\s*(추가|수정|삭제)/i,
+  // Plist / LaunchAgent config
+  /\b(plist|LaunchAgent)\b.*\b(수정|추가|변경)/i,
+  // Shell script config changes
+  /\b(\.sh|\.toml|\.yaml|\.yml)\b.*\b(수정|변경|업데이트)/i,
+  // Import/export tweaks
+  /\b(import|export)\s*(추가|수정|삭제)/i,
+  // Simple rename/move
+  /\b(이름|name)\s*(변경|바꿔|rename)/i,
 ];
 
 // Tier 1 keywords: straightforward coding tasks
+// Note: avoid overly generic words like "수정" or "추가해" alone — those overlap with tier 0
 const TIER1_KEYWORDS = [
-  "버그", "bug", "fix", "고쳐", "수정",
-  "새 기능", "new feature", "기능 추가", "추가해",
+  "버그", "bug", "fix", "고쳐",
+  "새 기능", "new feature", "기능 추가", "기능을 추가",
   "리팩토링", "refactor",
   "테스트", "test", "spec",
   "엔드포인트", "endpoint", "api",
   "컴포넌트", "component",
-  "함수", "function",
+  "함수", "function", "만들어",
   "스타일", "css", "style",
   "유효성", "validation",
+  "클래스", "class",
+  "구현", "implement",
 ];
 
 // Tier 2 keywords: complex, multi-part tasks
