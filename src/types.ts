@@ -106,6 +106,7 @@ export interface PluginConfig {
   routerMaxTokens: number;
   plannerMaxTokens: number;
   reviewerMaxTokens: number;
+  enableLegacyTools: boolean;
 }
 
 // --- Harness types ---

@@ -1,5 +1,10 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, formatDuration } from "../shared";
+import {
+  sessionManager,
+  formatDuration,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeOutputTool(ctx?: OpenClawPluginToolContext) {
@@ -20,6 +25,10 @@ export function makeClaudeOutputTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_output");
+      }
+
       if (!sessionManager) {
         return {
           content: [

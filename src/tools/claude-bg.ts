@@ -1,5 +1,12 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, resolveOriginChannel, resolveAgentChannel, hasValidOriginChannel } from "../shared";
+import {
+  sessionManager,
+  resolveOriginChannel,
+  resolveAgentChannel,
+  hasValidOriginChannel,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
@@ -35,6 +42,10 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_bg");
+      }
+
       if (!sessionManager) {
         return {
           content: [

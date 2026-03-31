@@ -1,5 +1,11 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, formatSessionListing, resolveAgentChannel } from "../shared";
+import {
+  sessionManager,
+  formatSessionListing,
+  resolveAgentChannel,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeSessionsTool(ctx?: OpenClawPluginToolContext) {
@@ -28,6 +34,10 @@ export function makeClaudeSessionsTool(ctx?: OpenClawPluginToolContext) {
       // ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_sessions");
+      }
+
       if (!sessionManager) {
         return {
           content: [

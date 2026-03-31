@@ -1,4 +1,10 @@
-import { sessionManager, resolveOriginChannel, formatDuration } from "../shared";
+import {
+  sessionManager,
+  resolveOriginChannel,
+  formatDuration,
+  isLegacyToolsEnabled,
+  legacyCommandDisabledResult,
+} from "../shared";
 
 export function registerClaudeResumeCommand(api: any): void {
   api.registerCommand({
@@ -8,6 +14,10 @@ export function registerClaudeResumeCommand(api: any): void {
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
+      if (!isLegacyToolsEnabled()) {
+        return legacyCommandDisabledResult("harness_resume");
+      }
+
       if (!sessionManager) {
         return {
           text: "Error: SessionManager not initialized. The claude-code service must be running.",

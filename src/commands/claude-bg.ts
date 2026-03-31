@@ -1,4 +1,9 @@
-import { sessionManager, resolveOriginChannel } from "../shared";
+import {
+  sessionManager,
+  resolveOriginChannel,
+  isLegacyToolsEnabled,
+  legacyCommandDisabledResult,
+} from "../shared";
 
 export function registerClaudeBgCommand(api: any): void {
   api.registerCommand({
@@ -7,6 +12,10 @@ export function registerClaudeBgCommand(api: any): void {
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
+      if (!isLegacyToolsEnabled()) {
+        return legacyCommandDisabledResult("harness_bg");
+      }
+
       if (!sessionManager) {
         return {
           text: "Error: SessionManager not initialized. The claude-code service must be running.",

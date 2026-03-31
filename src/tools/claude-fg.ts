@@ -1,5 +1,13 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, formatDuration, resolveOriginChannel, resolveAgentChannel, hasValidOriginChannel } from "../shared";
+import {
+  sessionManager,
+  formatDuration,
+  resolveOriginChannel,
+  resolveAgentChannel,
+  hasValidOriginChannel,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
@@ -37,6 +45,10 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_fg");
+      }
+
       if (!sessionManager) {
         return {
           content: [

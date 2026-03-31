@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, formatStats } from "../shared";
+import { sessionManager, formatStats, isLegacyToolsEnabled, legacyToolDisabledResult } from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeStatsTool(_ctx?: OpenClawPluginToolContext) {
@@ -9,6 +9,10 @@ export function makeClaudeStatsTool(_ctx?: OpenClawPluginToolContext) {
       "[LEGACY] Show Claude Code Plugin usage metrics: session counts by status, average duration, and notable sessions. Covers all sessions — both harness_execute (primary path) and harness_launch (LEGACY direct path). For new coding work, prefer harness_execute.",
     parameters: Type.Object({}),
     async execute(_id: string, _params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_stats");
+      }
+
       if (!sessionManager) {
         return {
           content: [

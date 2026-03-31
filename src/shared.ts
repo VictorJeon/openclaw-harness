@@ -21,6 +21,7 @@ export let pluginConfig: PluginConfig = {
   routerMaxTokens: 500,
   plannerMaxTokens: 2000,
   reviewerMaxTokens: 1000,
+  enableLegacyTools: true,
 };
 
 export function setPluginConfig(config: Partial<PluginConfig>): void {
@@ -60,6 +61,36 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     routerMaxTokens: (config as any).routerMaxTokens ?? 500,
     plannerMaxTokens: (config as any).plannerMaxTokens ?? 2000,
     reviewerMaxTokens: (config as any).reviewerMaxTokens ?? 1000,
+    enableLegacyTools: config.enableLegacyTools ?? true,
+  };
+}
+
+export function isLegacyToolsEnabled(): boolean {
+  return pluginConfig.enableLegacyTools ?? true;
+}
+
+export function formatLegacyToolsDisabledMessage(entrypoint: string): string {
+  return [
+    `Legacy direct-session surface is disabled (enableLegacyTools=false).`,
+    `${entrypoint} is unavailable.`,
+    `Use harness_execute instead.`,
+  ].join(" ");
+}
+
+export function legacyToolDisabledResult(toolName: string): { content: Array<{ type: "text"; text: string }> } {
+  return {
+    content: [
+      {
+        type: "text",
+        text: formatLegacyToolsDisabledMessage(toolName),
+      },
+    ],
+  };
+}
+
+export function legacyCommandDisabledResult(commandName: string): { text: string } {
+  return {
+    text: formatLegacyToolsDisabledMessage(`/${commandName}`),
   };
 }
 

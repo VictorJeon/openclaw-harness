@@ -1,4 +1,4 @@
-import { sessionManager } from "../shared";
+import { sessionManager, isLegacyToolsEnabled, legacyCommandDisabledResult } from "../shared";
 
 export function registerClaudeRespondCommand(api: any): void {
   api.registerCommand({
@@ -8,6 +8,10 @@ export function registerClaudeRespondCommand(api: any): void {
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx: any) => {
+      if (!isLegacyToolsEnabled()) {
+        return legacyCommandDisabledResult("harness_respond");
+      }
+
       if (!sessionManager) {
         return {
           text: "Error: SessionManager not initialized. The claude-code service must be running.",

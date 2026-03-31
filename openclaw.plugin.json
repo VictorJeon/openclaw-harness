@@ -107,7 +107,7 @@
       "enableLegacyTools": {
         "type": "boolean",
         "default": true,
-        "description": "[FUTURE] Enable legacy direct-session tools (harness_launch, harness_sessions, and /claude* commands). Not yet enforced — schema-only placeholder for a future gating mechanism. Leave true (default) to keep the legacy surface enabled."
+        "description": "Enable the legacy direct-session surface. When false, legacy tools and /harness* commands remain registered but refuse execution and direct users to harness_execute. Leave true (default) to preserve the current behavior."
       }
     }
   }

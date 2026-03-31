@@ -1,5 +1,11 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, pluginConfig, resolveAgentChannel } from "../shared";
+import {
+  sessionManager,
+  pluginConfig,
+  resolveAgentChannel,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeRespondTool(ctx?: OpenClawPluginToolContext) {
@@ -46,6 +52,10 @@ export function makeClaudeRespondTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_respond");
+      }
+
       if (!sessionManager) {
         return {
           content: [

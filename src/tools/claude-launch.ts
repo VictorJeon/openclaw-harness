@@ -2,7 +2,14 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { Type } from "@sinclair/typebox";
-import { sessionManager, pluginConfig, resolveAgentChannel, resolveAgentId } from "../shared";
+import {
+  sessionManager,
+  pluginConfig,
+  resolveAgentChannel,
+  resolveAgentId,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
@@ -73,6 +80,10 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_launch");
+      }
+
       if (!sessionManager) {
         return {
           content: [

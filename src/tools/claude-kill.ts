@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager } from "../shared";
+import { sessionManager, isLegacyToolsEnabled, legacyToolDisabledResult } from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeKillTool(ctx?: OpenClawPluginToolContext) {
@@ -10,6 +10,10 @@ export function makeClaudeKillTool(ctx?: OpenClawPluginToolContext) {
       session: Type.String({ description: "Session name or ID to terminate" }),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_kill");
+      }
+
       if (!sessionManager) {
         return {
           content: [
