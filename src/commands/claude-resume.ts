@@ -4,7 +4,7 @@ export function registerClaudeResumeCommand(api: any): void {
   api.registerCommand({
     name: "harness_resume",
     description:
-      "Resume a previous Claude Code session. Usage: /claude_resume <id-or-name> [prompt] or /claude_resume --list to see resumable sessions.",
+      "[LEGACY] Resume a previous Claude Code session launched via /harness or harness_launch. Usage: /harness_resume <id-or-name> [prompt] or /harness_resume --list to see resumable sessions.",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
@@ -17,7 +17,7 @@ export function registerClaudeResumeCommand(api: any): void {
       let args = (ctx.args ?? "").trim();
       if (!args) {
         return {
-          text: "Usage: /claude_resume <id-or-name> [prompt]\n       /claude_resume --list — list resumable sessions\n       /claude_resume --fork <id-or-name> [prompt] — fork instead of continuing",
+          text: "Usage: /harness_resume <id-or-name> [prompt]\n       /harness_resume --list — list resumable sessions\n       /harness_resume --fork <id-or-name> [prompt] — fork instead of continuing",
         };
       }
 
@@ -72,7 +72,7 @@ export function registerClaudeResumeCommand(api: any): void {
       const claudeSessionId = sessionManager.resolveClaudeSessionId(ref);
       if (!claudeSessionId) {
         return {
-          text: `Error: Could not find a Claude session ID for "${ref}".\nUse /claude_resume --list to see available sessions.`,
+          text: `Error: Could not find a Claude session ID for "${ref}".\nUse /harness_resume --list to see available sessions.`,
         };
       }
 

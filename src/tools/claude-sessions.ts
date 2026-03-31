@@ -6,7 +6,7 @@ export function makeClaudeSessionsTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "harness_sessions",
     description:
-      "List all Claude Code sessions with their status and progress.",
+      "[LEGACY] List all Claude Code sessions with their status and progress. Used to monitor sessions launched via harness_launch. For tasks executed through harness_execute, status is returned directly in the result.",
     parameters: Type.Object({
       status: Type.Optional(
         Type.Union(

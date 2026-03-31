@@ -3,7 +3,7 @@ import { sessionManager, pluginConfig, resolveOriginChannel } from "../shared";
 export function registerClaudeCommand(api: any): void {
   api.registerCommand({
     name: "harness",
-    description: "Launch a Claude Code session. Usage: /claude [--name <name>] <prompt>",
+    description: "[LEGACY] Launch a Claude Code session directly. For coding tasks with planning and review, use harness_execute instead. Usage: /harness [--name <name>] <prompt>",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
@@ -15,7 +15,7 @@ export function registerClaudeCommand(api: any): void {
 
       let args = (ctx.args ?? "").trim();
       if (!args) {
-        return { text: "Usage: /claude [--name <name>] <prompt>" };
+        return { text: "Usage: /harness [--name <name>] <prompt>" };
       }
 
       // Parse optional --name flag
@@ -28,7 +28,7 @@ export function registerClaudeCommand(api: any): void {
 
       const prompt = args;
       if (!prompt) {
-        return { text: "Usage: /claude [--name <name>] <prompt>" };
+        return { text: "Usage: /harness [--name <name>] <prompt>" };
       }
 
       try {

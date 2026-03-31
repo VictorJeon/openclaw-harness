@@ -25,7 +25,7 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "harness_bg",
     description:
-      "Send a Claude Code session back to background (stop streaming). If no session specified, detaches whichever session is currently in foreground.",
+      "[LEGACY] Send a Claude Code session back to background (stop streaming). If no session specified, detaches whichever session is currently in foreground. Only applies to sessions launched via harness_launch.",
     parameters: Type.Object({
       session: Type.Optional(
         Type.String({

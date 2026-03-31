@@ -33,7 +33,7 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
   return {
     name: "harness_execute",
     description:
-      "Execute a coding task through the Plan-Work-Review harness. Automatically classifies complexity, decomposes tasks, dispatches workers, and runs cross-model review. Returns a structured result with gaps detected.",
+      "Primary path for coding tasks. Execute a coding task through the Plan-Work-Review harness. Automatically classifies complexity, decomposes tasks, dispatches workers, and runs cross-model review. Returns a structured result with gaps detected.",
     parameters: Type.Object({
       request: Type.String({
         description: "The coding task to execute (natural language)",
@@ -326,7 +326,7 @@ async function executeTask(
     let workerResult: WorkerResult | null = null;
 
     if (useSubagent) {
-      // === ACP/Subagent path: real cross-model ===
+      // === ACP/Subagent path: real cross-model (tier 0/1 only) ===
       const workerKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}`;
       const workerIdempotencyKey = `harness-worker-${plan.id}-${task.id}-${Date.now()}`;
       const workerRunParams = {

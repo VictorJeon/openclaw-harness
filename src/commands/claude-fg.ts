@@ -3,7 +3,7 @@ import { sessionManager, formatDuration, resolveOriginChannel } from "../shared"
 export function registerClaudeFgCommand(api: any): void {
   api.registerCommand({
     name: "harness_fg",
-    description: "Bring a Claude Code session to foreground by name or ID",
+    description: "[LEGACY] Bring a Claude Code session to foreground by name or ID (for sessions launched via /harness or harness_launch)",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
@@ -15,7 +15,7 @@ export function registerClaudeFgCommand(api: any): void {
 
       const ref = ctx.args?.trim();
       if (!ref) {
-        return { text: "Usage: /claude_fg <name-or-id>" };
+        return { text: "Usage: /harness_fg <name-or-id>" };
       }
 
       const session = sessionManager.resolve(ref);
@@ -59,7 +59,7 @@ export function registerClaudeFgCommand(api: any): void {
 
       const footer =
         session.status === "running" || session.status === "starting"
-          ? `\n${"─".repeat(60)}\nStreaming... Use /claude_bg to detach.`
+          ? `\n${"─".repeat(60)}\nStreaming... Use /harness_bg to detach.`
           : `\n${"─".repeat(60)}\nSession is ${session.status}.`;
 
       // Mark that this channel has now seen all output up to this point

@@ -39,19 +39,19 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-### 3. Launch your first session
+### 3. Run your first coding task
 
 Ask your agent: *"Fix the bug in auth.ts"*
 
-On first launch, the plugin runs **4 safety checks** and guides you through one-time setup:
+The agent calls **`harness_execute`** — the primary path:
 
-1. **Answer an autonomy question** — tell the agent how much freedom Claude Code gets
-2. **Run a heartbeat config command** — paste the `jq` one-liner the agent provides
-3. **Restart the gateway** — `openclaw gateway restart`
+```
+harness_execute("Fix the bug in auth.ts")
+```
 
-That's it. Future launches skip setup entirely.
+The harness classifies complexity, decomposes the work, dispatches worker sessions, and returns structured results with any gaps flagged. No manual session management needed.
 
-> Full first-launch walkthrough: [docs/safety.md](docs/safety.md)
+> **Legacy path:** If you need interactive/multi-turn PTY sessions, the `/harness*` commands and `harness_launch` are still fully supported but are the legacy surface. See [docs/safety.md](docs/safety.md) for the one-time setup those require.
 
 ---
 
@@ -70,18 +70,28 @@ That's it. Future launches skip setup entirely.
 
 ## Tools
 
+### Primary path — Harness (Plan-Work-Review)
+
 | Tool | Description |
 |------|-------------|
-| `claude_launch` | Start a new Claude Code session in background |
-| `claude_respond` | Send a follow-up message to a running session |
-| `claude_fg` | Bring a session to foreground — stream output in real time |
-| `claude_bg` | Send a session back to background — stop streaming |
-| `claude_kill` | Terminate a running session |
-| `claude_output` | Read buffered output from a session |
-| `claude_sessions` | List all sessions with status and progress |
-| `claude_stats` | Show usage metrics (counts, durations, costs) |
+| `harness_execute` | **Primary.** Execute a coding task with automatic planning, worker dispatch, and cross-model review. Returns structured results with gaps detected. |
 
-All tools are also available as **chat commands** (`/claude`, `/claude_fg`, etc.) and most as **gateway RPC methods**.
+### Legacy path — Direct Claude Session surface
+
+The tools below provide direct PTY access to Claude Code sessions. They predate `harness_execute` and are still supported for interactive/multi-turn use cases that need raw session control. For automated coding tasks, prefer `harness_execute`.
+
+| Tool | Description |
+|------|-------------|
+| `harness_launch` | [LEGACY] Start a new Claude Code session in background |
+| `harness_respond` | [LEGACY] Send a follow-up message to a running session |
+| `harness_fg` | [LEGACY] Bring a session to foreground — stream output in real time |
+| `harness_bg` | [LEGACY] Send a session back to background — stop streaming |
+| `harness_kill` | [LEGACY] Terminate a running session |
+| `harness_output` | [LEGACY] Read buffered output from a session |
+| `harness_sessions` | [LEGACY] List all sessions with status and progress |
+| `harness_stats` | Show usage metrics (counts, durations, costs) — covers all paths |
+
+All legacy tools are also available as **chat commands** (`/harness`, `/harness_fg`, etc.) and most as **gateway RPC methods**.
 
 > Full parameter tables and response schemas: [docs/API.md](docs/API.md)
 
@@ -89,25 +99,45 @@ All tools are also available as **chat commands** (`/claude`, `/claude_fg`, etc.
 
 ## Quick Usage
 
+### Primary path — `harness_execute` (recommended for coding tasks)
+
+Ask your agent a coding task directly:
+
+> *"Add input validation to the signup endpoint"*
+
+The agent calls `harness_execute`:
+
+```
+harness_execute("Add input validation to the signup endpoint")
+```
+
+The harness classifies complexity, decomposes the work, dispatches worker sessions, and runs a cross-model review. Results are returned as structured output with any gaps flagged for a follow-up fix loop — no manual session management needed.
+
+Use `/harness_stats` (or `harness_stats`) at any time to see metrics across all sessions.
+
+### Legacy path — direct session commands (interactive / multi-turn)
+
+For raw PTY access or interactive sessions that need turn-by-turn control, the `/harness*` commands are still supported:
+
 ```bash
 # Launch a session
-/claude Fix the authentication bug in src/auth.ts
-/claude --name fix-auth Fix the authentication bug
+/harness Fix the authentication bug in src/auth.ts
+/harness --name fix-auth Fix the authentication bug
 
 # Monitor
-/claude_sessions
-/claude_fg fix-auth
-/claude_bg fix-auth
+/harness_sessions
+/harness_fg fix-auth
+/harness_bg fix-auth
 
 # Interact
-/claude_respond fix-auth Also add unit tests
-/claude_respond --interrupt fix-auth Stop that and do this instead
+/harness_respond fix-auth Also add unit tests
+/harness_respond --interrupt fix-auth Stop that and do this instead
 
 # Lifecycle
-/claude_kill fix-auth
-/claude_resume fix-auth Add error handling
-/claude_resume --fork fix-auth Try a different approach
-/claude_stats
+/harness_kill fix-auth
+/harness_resume fix-auth Add error handling
+/harness_resume --fork fix-auth Try a different approach
+/harness_stats
 ```
 
 ---
@@ -194,7 +224,7 @@ metadata: {"openclaw": {"requires": {"plugins": ["openclaw-claude-code-plugin"]}
 
 When a Claude Code session asks a question, analyze and decide:
 
-### Auto-respond (use `claude_respond` immediately):
+### Auto-respond (use `harness_respond` immediately):
 - Permission requests for file reads, writes, or bash commands -> "Yes, proceed."
 - Confirmation prompts like "Should I continue?" -> "Yes, continue."
 
@@ -204,9 +234,17 @@ When a Claude Code session asks a question, analyze and decide:
 - Anything involving credentials, secrets, or production environments
 
 ## Workflow
-1. User sends a coding task -> `claude_launch(prompt, ...)`
+
+### Primary path (recommended)
+1. User sends a coding task -> `harness_execute(prompt, ...)`
+2. Harness classifies, decomposes, dispatches workers, and runs review loop.
+3. On completion -> structured result with gaps; fix loop runs automatically if needed.
+4. Report final result to user.
+
+### Legacy path (interactive / multi-turn) [LEGACY]
+1. User sends a coding task -> `harness_launch(prompt, ...)` [LEGACY]
 2. Session runs in background. Monitor via wake events.
-3. On wake event -> `claude_output` to read the question, then auto-respond or forward.
+3. On wake event -> `harness_output` to read the question, then auto-respond or forward.
 4. On completion -> summarize the result and notify the user.
 ```
 
@@ -222,7 +260,7 @@ A comprehensive orchestration skill is available at [`skills/claude-code-orchest
 |----------|-------------|
 | [docs/getting-started.md](docs/getting-started.md) | Full setup guide and first-launch walkthrough |
 | [docs/API.md](docs/API.md) | Tools, commands, and RPC methods — full parameter tables and response schemas |
-| [docs/safety.md](docs/safety.md) | Pre-launch safety checks and troubleshooting |
+| [docs/safety.md](docs/safety.md) | Pre-launch safety checks for the legacy `harness_launch` path |
 | [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md) | Notification architecture, delivery model, and wake mechanism |
 | [docs/AGENT_CHANNELS.md](docs/AGENT_CHANNELS.md) | Multi-agent setup, notification routing, and workspace mapping |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Architecture overview and component breakdown |

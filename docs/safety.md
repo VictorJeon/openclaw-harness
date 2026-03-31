@@ -1,8 +1,14 @@
-# Safety & Pre-Launch Checks
+# Safety & Pre-Launch Checks — Legacy Path
 
-When an agent calls the `claude_launch` tool, **4 mandatory guards** run before any session is spawned. If any check fails, the launch is blocked with a clear, actionable error message — and the agent either fixes it automatically or gives you a one-liner to run.
+> ⚠️ **This document covers the legacy direct-session surface only.**
+>
+> These safety checks apply exclusively to the **`harness_launch` tool** and **`/harness` command** (direct PTY session surface). The primary **`harness_execute`** path manages its own worker lifecycle internally and does **not** run any of these guards.
+>
+> If you are using `harness_execute` for coding tasks, you do not need to read this document.
 
-These checks are enforced only on the `claude_launch` **tool** (agent callers). The gateway RPC method (`claude-code.launch`) and chat command (`/claude`) skip them — those callers are assumed to be properly configured.
+When an agent calls the `harness_launch` tool, **4 mandatory guards** run before any session is spawned. If any check fails, the launch is blocked with a clear, actionable error message — and the agent either fixes it automatically or gives you a one-liner to run.
+
+These checks are enforced only on the `harness_launch` **tool** (agent callers). The gateway RPC method (`claude-code.launch`) and chat command (`/harness`) skip them — those callers are assumed to be properly configured.
 
 > **Source of truth:** `src/tools/claude-launch.ts` (lines 143-399)
 

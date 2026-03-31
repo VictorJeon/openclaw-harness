@@ -25,7 +25,7 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "harness_fg",
     description:
-      "Bring a Claude Code session to foreground (by name or ID). Shows buffered output and streams new output.",
+      "[LEGACY] Bring a Claude Code session to foreground (by name or ID). Shows buffered output and streams new output. Only applies to sessions launched via harness_launch; harness_execute sessions are fully managed by the harness.",
     parameters: Type.Object({
       session: Type.String({
         description: "Session name or ID to bring to foreground",

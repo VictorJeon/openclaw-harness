@@ -6,26 +6,91 @@ All tools provided by the OpenClaw Claude Code plugin. Each tool is exposed to a
 
 ---
 
-## Tool Summary
+## Execution Paths — Primary vs Legacy
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `claude_launch` | Launch a Claude Code session | `prompt`, `workdir`, `name`, `model`, `resume_session_id` |
-| `claude_respond` | Send follow-up message to a running session | `session`, `message`, `interrupt`, `userInitiated` |
-| `claude_fg` | Bring a session to foreground for streaming | `session`, `lines` |
-| `claude_bg` | Send a session to background | `session` (optional) |
-| `claude_kill` | Terminate a session | `session` |
-| `claude_output` | Show session output (read-only) | `session`, `lines`, `full` |
-| `claude_sessions` | List all sessions | `status` |
-| `claude_stats` | Show usage metrics | *(none)* |
+The plugin exposes two execution paths:
 
-> **Note:** There is no separate `claude_resume` tool. To resume a previous session, use `claude_launch` with the `resume_session_id` parameter.
+| Path | Entry point | When to use |
+|------|-------------|-------------|
+| **Primary — Harness** | `harness_execute` | **Recommended for all automated coding tasks.** Auto-classifies complexity, decomposes into tasks, dispatches workers, runs cross-model review, returns structured results with gaps detected. |
+| **Legacy — Direct sessions** | `harness_launch` + `harness_respond` + `harness_fg` / `harness_bg` / `harness_kill` / `harness_output` / `harness_sessions` / `harness_stats` | Interactive/multi-turn sessions requiring direct PTY access; debugging; sessions that predate the harness. **Prefer `harness_execute` for new work.** |
 
 ---
 
-## claude_launch
+## Tool Summary
 
-Launch a Claude Code session in the background to execute a development task. Sessions are multi-turn by default (they stay open for follow-up messages via `claude_respond`).
+### Primary
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `harness_execute` | **Primary coding path.** Execute a coding task through the Plan-Work-Review harness | `request`, `workdir`, `mode`, `tier_override`, `max_budget_usd`, `approved_plan_id` |
+
+### Legacy (Direct-Session) [LEGACY]
+
+> These tools remain fully supported but are the **legacy direct-session surface**. Use `harness_execute` for new automated coding tasks.
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `harness_launch` | Launch a Claude Code session directly | `prompt`, `workdir`, `name`, `model`, `resume_session_id` |
+| `harness_respond` | Send follow-up message to a running session | `session`, `message`, `interrupt`, `userInitiated` |
+| `harness_fg` | Bring a session to foreground for streaming | `session`, `lines` |
+| `harness_bg` | Send a session to background | `session` (optional) |
+| `harness_kill` | Terminate a session | `session` |
+| `harness_output` | Show session output (read-only) | `session`, `lines`, `full` |
+| `harness_sessions` | List all sessions | `status` |
+| `harness_stats` | Show usage metrics | *(none)* |
+
+> **Note:** There is no separate resume tool. To resume a previous session, use `harness_launch` with the `resume_session_id` parameter.
+
+---
+
+## harness_execute
+
+Execute a coding task through the Plan-Work-Review harness. **This is the primary coding path** for automated development tasks.
+
+Automatically classifies complexity, decomposes the task, dispatches workers, and runs cross-model review. Returns a structured result with any gaps detected.
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | string | **yes** | — | The coding task to execute (natural language) |
+| `workdir` | string | no | agent workspace / cwd | Working directory for the task |
+| `mode` | enum | no | `delegate` | Operation mode: `ask` (all approvals), `delegate` (auto safe ops), `autonomous` (fully auto) |
+| `tier_override` | number | no | auto-classified | Override automatic tier classification: `0`, `1`, or `2` |
+| `max_budget_usd` | number | no | plugin config | Maximum budget in USD |
+| `approved_plan_id` | string | no | — | Plan ID from a previous approval-gated response — pass this to skip the approval gate and execute the approved plan |
+
+### Example
+
+```
+harness_execute(
+  request: "Fix the authentication bug in src/auth.ts — users are logged out after refresh",
+  workdir: "/home/user/my-project"
+)
+```
+
+### With Mode Override
+
+```
+harness_execute(
+  request: "Refactor the payment module to use the new Stripe SDK",
+  workdir: "/home/user/my-project",
+  mode: "autonomous"
+)
+```
+
+---
+
+## Legacy Direct-Session Tools [LEGACY]
+
+> The following tools are the **legacy direct-session surface**. They remain fully supported for interactive/multi-turn sessions, debugging, and resuming sessions that predate the harness. For new automated coding tasks, prefer `harness_execute`.
+
+---
+
+## harness_launch [LEGACY]
+
+Launch a Claude Code session in the background to execute a development task. Sessions are multi-turn by default (they stay open for follow-up messages via `harness_respond`).
 
 ### Parameters
 
@@ -45,12 +110,12 @@ Launch a Claude Code session in the background to execute a development task. Se
 
 ### Pre-Launch Guards
 
-Before spawning, `claude_launch` runs [4 mandatory safety checks](safety.md). If any check fails, the launch is blocked with an actionable error message. Other tools and the gateway RPC skip these guards.
+Before spawning, `harness_launch` runs [4 mandatory safety checks](safety.md). If any check fails, the launch is blocked with an actionable error message. Other tools and the gateway RPC skip these guards.
 
 ### Example
 
 ```
-claude_launch(
+harness_launch(
   prompt: "Fix the authentication bug in src/auth.ts — users are logged out after refresh",
   name: "fix-auth-bug",
   workdir: "/home/user/my-project",
@@ -61,7 +126,7 @@ claude_launch(
 ### Resuming a Previous Session
 
 ```
-claude_launch(
+harness_launch(
   prompt: "Continue where you left off — also add tests for the fix",
   resume_session_id: "abc12345",
   name: "fix-auth-continued"
@@ -71,7 +136,7 @@ claude_launch(
 ### Forking a Session
 
 ```
-claude_launch(
+harness_launch(
   prompt: "Try an alternative approach using JWT instead",
   resume_session_id: "abc12345",
   fork_session: true,
@@ -81,7 +146,7 @@ claude_launch(
 
 ---
 
-## claude_respond
+## harness_respond [LEGACY]
 
 Send a follow-up message to a running multi-turn Claude Code session.
 
@@ -105,7 +170,7 @@ The plugin tracks how many times an agent auto-responds to a session. When the c
 ### Example
 
 ```
-claude_respond(
+harness_respond(
   session: "fix-auth-bug",
   message: "Yes, use the refresh token stored in httpOnly cookies"
 )
@@ -114,7 +179,7 @@ claude_respond(
 ### Interrupting and Redirecting
 
 ```
-claude_respond(
+harness_respond(
   session: "fix-auth-bug",
   message: "Stop — don't modify the database schema. Only change the token logic.",
   interrupt: true
@@ -123,7 +188,7 @@ claude_respond(
 
 ---
 
-## claude_fg
+## harness_fg [LEGACY]
 
 Bring a Claude Code session to the foreground. Shows buffered output and starts streaming new output to the current channel.
 
@@ -141,7 +206,7 @@ When a session is brought to foreground, the plugin checks for "catchup" output 
 ### Example
 
 ```
-claude_fg(session: "fix-auth-bug", lines: 50)
+harness_fg(session: "fix-auth-bug", lines: 50)
 ```
 
 **Output:**
@@ -152,14 +217,14 @@ Status: RUNNING | Duration: 2m 15s
 📋 Catchup (3 missed outputs):
 ...
 ────────────────────────────────────────────────────────────
-Streaming new output... Use claude_bg to detach.
+Streaming new output... Use harness_bg to detach.
 ```
 
 ---
 
-## claude_bg
+## harness_bg [LEGACY]
 
-Send a Claude Code session back to background (stop streaming output). Saves the current output offset so `claude_fg` can show catchup later.
+Send a Claude Code session back to background (stop streaming output). Saves the current output offset so `harness_fg` can show catchup later.
 
 ### Parameters
 
@@ -171,15 +236,15 @@ Send a Claude Code session back to background (stop streaming output). Saves the
 
 ```
 # Background a specific session
-claude_bg(session: "fix-auth-bug")
+harness_bg(session: "fix-auth-bug")
 
 # Background whatever is currently in foreground
-claude_bg()
+harness_bg()
 ```
 
 ---
 
-## claude_kill
+## harness_kill [LEGACY]
 
 Terminate a running Claude Code session. Cannot kill sessions that are already in a terminal state (`completed`, `failed`, `killed`).
 
@@ -192,12 +257,12 @@ Terminate a running Claude Code session. Cannot kill sessions that are already i
 ### Example
 
 ```
-claude_kill(session: "fix-auth-bug")
+harness_kill(session: "fix-auth-bug")
 ```
 
 ---
 
-## claude_output
+## harness_output [LEGACY]
 
 Show recent output from a Claude Code session. Read-only — does not change foreground state or affect streaming.
 
@@ -212,7 +277,7 @@ Show recent output from a Claude Code session. Read-only — does not change for
 ### Example
 
 ```
-claude_output(session: "fix-auth-bug", lines: 100)
+harness_output(session: "fix-auth-bug", lines: 100)
 ```
 
 **Output:**
@@ -224,7 +289,7 @@ Session: fix-auth-bug [a1b2c3d4] | Status: RUNNING | Duration: 5m 30s
 
 ---
 
-## claude_sessions
+## harness_sessions [LEGACY]
 
 List all Claude Code sessions with their status and progress. When called by an agent with a workspace context, sessions are filtered to show only that agent's sessions (matched via `originChannel`).
 
@@ -236,12 +301,12 @@ List all Claude Code sessions with their status and progress. When called by an 
 
 ### Agent-Aware Filtering
 
-When an agent calls `claude_sessions`, the plugin resolves the agent's channel from `agentChannels` config and filters sessions by `originChannel`. This ensures each agent only sees its own sessions. Falls back to showing all sessions if no channel mapping is found.
+When an agent calls `harness_sessions`, the plugin resolves the agent's channel from `agentChannels` config and filters sessions by `originChannel`. This ensures each agent only sees its own sessions. Falls back to showing all sessions if no channel mapping is found.
 
 ### Example
 
 ```
-claude_sessions(status: "running")
+harness_sessions(status: "running")
 ```
 
 **Output:**
@@ -257,7 +322,7 @@ claude_sessions(status: "running")
 
 ---
 
-## claude_stats
+## harness_stats [LEGACY]
 
 Show Claude Code Plugin usage metrics: session counts by status, total cost, average duration, and the most expensive session.
 
@@ -268,7 +333,7 @@ Show Claude Code Plugin usage metrics: session counts by status, total cost, ave
 ### Example
 
 ```
-claude_stats()
+harness_stats()
 ```
 
 **Output:**
@@ -285,16 +350,16 @@ Most expensive: fix-auth-bug ($1.20) — "Fix the authentication bug..."
 ## Session Lifecycle
 
 ```
-claude_launch  ──►  STARTING  ──►  RUNNING  ──►  COMPLETED
+harness_launch  ──►  STARTING  ──►  RUNNING  ──►  COMPLETED
                                      │              ▲
                                      │              │
                                      ▼              │
-                               claude_respond ──────┘
-                               claude_fg / claude_bg
-                               claude_output
+                               harness_respond ──────┘
+                               harness_fg / harness_bg
+                               harness_output
                                      │
                                      ▼
-                               claude_kill  ──►  KILLED
+                               harness_kill  ──►  KILLED
 
                                (errors)    ──►  FAILED
 ```
@@ -303,7 +368,7 @@ claude_launch  ──►  STARTING  ──►  RUNNING  ──►  COMPLETED
 - **RUNNING** — Session is active and accepting messages
 - **COMPLETED** — Session finished successfully
 - **FAILED** — Session errored out
-- **KILLED** — Session was terminated via `claude_kill`
+- **KILLED** — Session was terminated via `harness_kill`
 
 ---
 
@@ -311,4 +376,4 @@ claude_launch  ──►  STARTING  ──►  RUNNING  ──►  COMPLETED
 
 Most tools accept a `session` parameter that can be either a **session name** (e.g. `fix-auth-bug`) or a **session ID** (e.g. `a1b2c3d4`). The plugin resolves by ID first, then falls back to name matching.
 
-For `claude_launch` with `resume_session_id`, the plugin additionally checks persisted sessions (sessions that have been garbage-collected from memory but whose metadata is still stored). It accepts internal IDs, session names, or Claude UUIDs.
+For `harness_launch` with `resume_session_id`, the plugin additionally checks persisted sessions (sessions that have been garbage-collected from memory but whose metadata is still stored). It accepts internal IDs, session names, or Claude UUIDs.

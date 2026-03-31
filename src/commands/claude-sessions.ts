@@ -3,7 +3,7 @@ import { sessionManager, formatSessionListing } from "../shared";
 export function registerClaudeSessionsCommand(api: any): void {
   api.registerCommand({
     name: "harness_sessions",
-    description: "List all Claude Code sessions",
+    description: "[LEGACY] List all Claude Code sessions (for sessions launched via /harness or harness_launch)",
     acceptsArgs: false,
     requireAuth: true,
     handler: () => {

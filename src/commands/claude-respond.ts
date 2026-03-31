@@ -4,7 +4,7 @@ export function registerClaudeRespondCommand(api: any): void {
   api.registerCommand({
     name: "harness_respond",
     description:
-      "Send a follow-up message to a running Claude Code session. Usage: /claude_respond <id-or-name> <message>",
+      "[LEGACY] Send a follow-up message to a running Claude Code session launched via /harness or harness_launch. Usage: /harness_respond <id-or-name> <message>",
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx: any) => {
@@ -17,7 +17,7 @@ export function registerClaudeRespondCommand(api: any): void {
       const args = (ctx.args ?? "").trim();
       if (!args) {
         return {
-          text: "Usage: /claude_respond <id-or-name> <message>\n       /claude_respond --interrupt <id-or-name> <message>",
+          text: "Usage: /harness_respond <id-or-name> <message>\n       /harness_respond --interrupt <id-or-name> <message>",
         };
       }
 
@@ -33,7 +33,7 @@ export function registerClaudeRespondCommand(api: any): void {
       const spaceIdx = remaining.indexOf(" ");
       if (spaceIdx === -1) {
         return {
-          text: "Error: Missing message. Usage: /claude_respond <id-or-name> <message>",
+          text: "Error: Missing message. Usage: /harness_respond <id-or-name> <message>",
         };
       }
 
@@ -42,7 +42,7 @@ export function registerClaudeRespondCommand(api: any): void {
 
       if (!message) {
         return {
-          text: "Error: Empty message. Usage: /claude_respond <id-or-name> <message>",
+          text: "Error: Empty message. Usage: /harness_respond <id-or-name> <message>",
         };
       }
 

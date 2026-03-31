@@ -14,33 +14,46 @@ claude-code/
 │   ├── session-manager.ts      # Session pool management
 │   ├── notifications.ts        # NotificationRouter
 │   ├── gateway.ts              # RPC method registration
+│   ├── router.ts               # Tier classifier for harness_execute
+│   ├── planner.ts              # Task decomposer for harness_execute
+│   ├── reviewer.ts             # Review output parser for harness_execute
+│   ├── review-loop.ts          # Review-fix loop orchestrator
+│   ├── checkpoint.ts           # Checkpoint persistence for harness_execute
 │   ├── tools/
-│   │   ├── claude-launch.ts    # claude_launch tool
-│   │   ├── claude-sessions.ts  # claude_sessions tool
-│   │   ├── claude-output.ts    # claude_output tool
-│   │   ├── claude-fg.ts        # claude_fg tool
-│   │   ├── claude-bg.ts        # claude_bg tool
-│   │   ├── claude-kill.ts      # claude_kill tool
-│   │   ├── claude-respond.ts   # claude_respond tool
-│   │   └── claude-stats.ts     # claude_stats tool
+│   │   ├── harness-execute.ts  # harness_execute tool (PRIMARY — Plan-Work-Review)
+│   │   ├── claude-launch.ts    # harness_launch tool [LEGACY — direct PTY session]
+│   │   ├── claude-sessions.ts  # harness_sessions tool [LEGACY]
+│   │   ├── claude-output.ts    # harness_output tool [LEGACY]
+│   │   ├── claude-fg.ts        # harness_fg tool [LEGACY]
+│   │   ├── claude-bg.ts        # harness_bg tool [LEGACY]
+│   │   ├── claude-kill.ts      # harness_kill tool [LEGACY]
+│   │   ├── claude-respond.ts   # harness_respond tool [LEGACY]
+│   │   └── claude-stats.ts     # harness_stats tool (covers all paths)
 │   └── commands/
-│       ├── claude.ts           # /claude command
-│       ├── claude-sessions.ts  # /claude_sessions command
-│       ├── claude-fg.ts        # /claude_fg command
-│       ├── claude-bg.ts        # /claude_bg command
-│       ├── claude-kill.ts      # /claude_kill command
-│       ├── claude-resume.ts    # /claude_resume command
-│       ├── claude-respond.ts   # /claude_respond command
-│       └── claude-stats.ts     # /claude_stats command
+│       ├── claude.ts           # /harness command [LEGACY — direct session]
+│       ├── claude-sessions.ts  # /harness_sessions command [LEGACY]
+│       ├── claude-fg.ts        # /harness_fg command [LEGACY]
+│       ├── claude-bg.ts        # /harness_bg command [LEGACY]
+│       ├── claude-kill.ts      # /harness_kill command [LEGACY]
+│       ├── claude-resume.ts    # /harness_resume command [LEGACY]
+│       ├── claude-respond.ts   # /harness_respond command [LEGACY]
+│       └── claude-stats.ts     # /harness_stats command (covers all paths)
 ├── skills/
 │   └── claude-code-orchestration/
 │       └── SKILL.md            # Orchestration skill definition
 └── docs/
     ├── API.md                  # Full API reference
-    ├── ARCHITECTURE.md         # Architecture overview
+    ├── ARCHITECTURE.md         # Architecture overview (primary vs legacy paths)
     ├── NOTIFICATIONS.md        # Notification system details
+    ├── safety.md               # Pre-launch safety checks (legacy harness_launch path)
     └── DEVELOPMENT.md          # This file
 ```
+
+### Primary vs Legacy paths
+
+`harness_execute` is the **primary** execution path. It classifies complexity (tier 0/1/2), decomposes the request into tasks, dispatches workers (via `runtime.subagent.run` or `sessionManager.spawn` fallback), and runs a cross-model review loop. Results are returned directly as structured output.
+
+The `harness_launch` tool and `/harness*` commands form the **legacy direct-session surface**. They provide raw PTY access to Claude Code sessions and are still appropriate for interactive/multi-turn use cases. They are not the recommended path for new automated coding tasks.
 
 ---
 

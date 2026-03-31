@@ -4,6 +4,17 @@
 
 OpenClaw plugin that enables AI agents to orchestrate Claude Code sessions from messaging channels (Telegram, Discord, Rocket.Chat). Agents can spawn, monitor, resume, and manage Claude Code as background development tasks.
 
+## Execution Surface — Primary vs Legacy
+
+The plugin exposes two execution paths:
+
+| Path | Entry point | When to use |
+|------|-------------|-------------|
+| **Primary — Harness** | `harness_execute` | Automated coding tasks: auto-classifies complexity, decomposes into tasks, dispatches workers, runs cross-model review, returns structured results |
+| **Legacy — Direct sessions** | `harness_launch` + `harness_respond` + `harness_fg` / `harness_bg` / `harness_kill` / `harness_output` / `harness_sessions` | Interactive/multi-turn sessions requiring direct PTY access; debugging; sessions that predate the harness |
+
+The `/harness*` commands and their corresponding tool equivalents (`harness_launch`, `harness_sessions`, etc.) are the **legacy direct-session surface**. They remain fully supported but are not the recommended path for new automated coding tasks.
+
 ## System Context
 
 ```
@@ -44,9 +55,20 @@ User (Telegram/Discord) → OpenClaw Gateway → Agent → Plugin Tools → Clau
 
 ## Data Flow
 
-### Session Launch
+### Primary Path — harness_execute
 ```
-Agent calls claude_launch → tool validates params → SessionManager.spawn()
+Agent calls harness_execute(request, workdir, mode)
+  → Harness classifies complexity (Tier 0 / 1 / 2)
+  → Task decomposed into sub-tasks
+  → Workers dispatched (one or more Claude Code sessions via SessionManager)
+  → Cross-model review runs against worker output
+  → Structured result returned to agent with gaps detected
+  → Agent surfaces summary + gap list to user
+```
+
+### Legacy Path — Direct Session Launch [LEGACY]
+```
+Agent calls harness_launch → tool validates params → SessionManager.spawn()
   → Session created with PTY → Claude Code process starts
   → Origin channel stored for notifications
   → Pre-launch safety checks (autonomy skill, heartbeat config)
