@@ -325,8 +325,34 @@ async function executeTask(
     let workerSessionId = "";
     let workerResult: WorkerResult | null = null;
 
-    if (useSubagent) {
-      // === ACP/Subagent path: real cross-model ===
+    // Tier 2: use claude-realtime.sh on Hetzner for complex tasks
+    const isTier2 = plan.tier === 2;
+    if (isTier2) {
+      console.log(`[harness] Tier 2: using claude-realtime.sh for task=${task.id}`);
+      const realtimeResult = await runClaudeRealtime(task, plan, workdir, agentId);
+      workerSessionId = realtimeResult.jobId;
+      workerResult = realtimeResult.result;
+      recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
+      
+      if (!workerResult) {
+        updateTaskStatus(checkpoint, task.id, "failed", workdir);
+        return {
+          taskId: task.id,
+          workerSessionId,
+          workerResult: null,
+          reviewPassed: false,
+          reviewLoops: 0,
+          escalated: true,
+          error: `claude-realtime.sh failed: ${realtimeResult.error ?? "unknown"}`,
+        };
+      }
+      
+      updateTaskStatus(checkpoint, task.id, "in-review", workdir, { workerResult });
+      // Fall through to review phase below
+    }
+
+    if (!isTier2 && useSubagent) {
+      // === ACP/Subagent path: real cross-model (tier 0/1 only) ===
       const workerKey = `agent:${agentId}:subagent:harness-${plan.id}-${task.id}`;
       const workerIdempotencyKey = `harness-worker-${plan.id}-${task.id}-${Date.now()}`;
       const workerRunParams = {
@@ -363,7 +389,7 @@ async function executeTask(
       workerResult = parseWorkerOutput(lastMsg, task.id);
       // Cleanup
       try { await runtime.subagent.deleteSession({ sessionKey: workerKey }); } catch {}
-    } else {
+    } else if (!isTier2) {
       // === Fallback: sessionManager.spawn (CC PTY) ===
       console.warn(`[harness] Fallback to sessionManager.spawn (no runtime.subagent)`);
       const workerSession = sessionManager!.spawn({
@@ -381,23 +407,26 @@ async function executeTask(
       workerResult = await waitForCompletion(workerSession.id, task.id);
     }
 
-    recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
-    console.log(`[harness] Worker done: task=${task.id}, session=${workerSessionId}, model=${workerModel}, useSubagent=${useSubagent}`);
+    if (!isTier2) {
+      // Only for tier 0/1 — tier 2 already handled above
+      recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
+      console.log(`[harness] Worker done: task=${task.id}, session=${workerSessionId}, model=${workerModel}, useSubagent=${useSubagent}`);
 
-    if (!workerResult) {
-      updateTaskStatus(checkpoint, task.id, "failed", workdir);
-      return {
-        taskId: task.id,
-        workerSessionId,
-        workerResult: null,
-        reviewPassed: false,
-        reviewLoops: 0,
-        escalated: true,
-        error: "Worker session did not produce a result",
-      };
+      if (!workerResult) {
+        updateTaskStatus(checkpoint, task.id, "failed", workdir);
+        return {
+          taskId: task.id,
+          workerSessionId,
+          workerResult: null,
+          reviewPassed: false,
+          reviewLoops: 0,
+          escalated: true,
+          error: "Worker session did not produce a result",
+        };
+      }
+
+      updateTaskStatus(checkpoint, task.id, "in-review", workdir, { workerResult });
     }
-
-    updateTaskStatus(checkpoint, task.id, "in-review", workdir, { workerResult });
 
     // --- Review phase: cross-model review loop ---
     const reviewLoop = initReviewLoop(task.id);
@@ -861,4 +890,146 @@ function parseWorkerOutput(text: string, taskId: string): WorkerResult | null {
     testsRun: 0,
     warnings: [],
   };
+}
+
+/**
+ * Run claude-realtime.sh on Hetzner for tier 2 complex tasks.
+ * 
+ * Flow:
+ * 1. Write spec file to /tmp/harness/{planId}/spec.md
+ * 2. Execute claude-realtime.sh --remote --bg
+ * 3. Poll status file until done/error/aborted
+ * 4. Collect result summary
+ */
+async function runClaudeRealtime(
+  task: TaskSpec,
+  plan: HarnessPlan,
+  workdir: string,
+  agentId: string = "nova",
+): Promise<{ jobId: string; result: WorkerResult | null; error?: string }> {
+  const { execFile } = require("child_process");
+  const { writeFileSync, readFileSync, mkdirSync, existsSync } = require("fs");
+  const path = require("path");
+
+  const specDir = `/tmp/harness/${plan.id}`;
+  mkdirSync(specDir, { recursive: true });
+
+  // Build spec content (Goal + Scope + Acceptance Criteria format for claude-realtime.sh spec gate)
+  const specContent = [
+    `# Goal`,
+    `${plan.originalRequest}`,
+    ``,
+    `# Scope`,
+    `${task.scope}`,
+    ``,
+    `# Acceptance Criteria`,
+    ...task.acceptanceCriteria.map((c: string) => `- ${c}`),
+    ``,
+    `# Context`,
+    `Working directory: ${workdir}`,
+    `Task ID: ${task.id}`,
+    `Harness plan: ${plan.id}`,
+  ].join("\n");
+
+  const specPath = path.join(specDir, "spec.md");
+  writeFileSync(specPath, specContent);
+  console.log(`[harness] Tier 2 spec written: ${specPath}`);
+
+  // Launch claude-realtime.sh --remote --bg
+  // Resolve the script path: prefer local, fallback to well-known locations
+  const scriptPath = (() => {
+    const candidates = [
+      path.join(process.env.HOME ?? "/Users/nova", ".local/bin/claude-realtime.sh"),
+      "/Users/nova/.local/bin/claude-realtime.sh",
+      path.join(process.env.HOME ?? "/Users/nova", "scripts/claude-realtime.sh"),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) return p;
+    }
+    return "claude-realtime.sh"; // fallback to PATH
+  })();
+
+  return new Promise((resolve) => {
+    const args = [specPath, workdir, "--remote", "--bg", "--max-rounds", "5", "--notify-agent", agentId, "--skip-claude-md"];
+    console.log(`[harness] Launching: ${scriptPath} ${args.join(" ")}`);
+
+    execFile(scriptPath, args, {
+      timeout: 120000, // 2min to allow remote sync + bg fork
+      env: { ...process.env },
+      shell: true,
+    }, (err: any, stdout: string, stderr: string) => {
+      if (err) {
+        console.error(`[harness] claude-realtime.sh launch error: ${err.message}`);
+        resolve({ jobId: "", result: null, error: err.message });
+        return;
+      }
+
+      // Extract job ID from stdout — --bg mode outputs "BG:/tmp/claude-realtime/rt-YYYYMMDD-HHMMSS"
+      const bgMatch = stdout.match(/BG:\/tmp\/claude-realtime\/(rt-[^\s\/]+)/);
+      const fallbackMatch = stdout.match(/\/tmp\/claude-realtime\/(rt-[^\s\/]+)/);
+      const jobId = bgMatch?.[1] ?? fallbackMatch?.[1] ?? `rt-${plan.id}`;
+      const stateDir = `/tmp/claude-realtime/${jobId}`;
+      console.log(`[harness] claude-realtime.sh launched: jobId=${jobId}, stateDir=${stateDir}, stdout=${stdout.slice(0, 200)}`);
+
+      // Poll status file
+      const pollInterval = 15000; // 15s
+      const maxWaitMs = 30 * 60 * 1000; // 30 minutes max
+      const startTime = Date.now();
+
+      const poll = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        if (elapsed > maxWaitMs) {
+          clearInterval(poll);
+          console.warn(`[harness] claude-realtime.sh timeout after ${elapsed}ms`);
+          resolve({ jobId, result: null, error: "claude-realtime.sh timed out after 30 minutes" });
+          return;
+        }
+
+        try {
+          const statusPath = path.join(stateDir, "status");
+          if (!existsSync(statusPath)) return; // Still starting
+
+          const status = readFileSync(statusPath, "utf-8").trim();
+          console.log(`[harness] claude-realtime.sh status: ${status} (${Math.round(elapsed / 1000)}s)`);
+
+          if (status === "done") {
+            clearInterval(poll);
+            // Collect result from summary/output files
+            let summary = "";
+            const summaryPath = path.join(stateDir, "summary.md");
+            const outputPath = path.join(stateDir, "output.log");
+            if (existsSync(summaryPath)) {
+              summary = readFileSync(summaryPath, "utf-8");
+            } else if (existsSync(outputPath)) {
+              const output = readFileSync(outputPath, "utf-8");
+              summary = output.slice(-2000); // Last 2000 chars
+            }
+            resolve({
+              jobId,
+              result: {
+                taskId: task.id,
+                status: "completed",
+                summary: summary || "claude-realtime.sh completed",
+                filesChanged: [],
+                testsRun: 0,
+                warnings: [],
+              },
+            });
+          } else if (status === "error" || status.startsWith("error:")) {
+            clearInterval(poll);
+            resolve({ jobId, result: null, error: `claude-realtime.sh ended with status: ${status}` });
+          } else if (status === "aborted") {
+            clearInterval(poll);
+            resolve({ jobId, result: null, error: "claude-realtime.sh was aborted" });
+          } else if (status === "plan_violation") {
+            clearInterval(poll);
+            resolve({ jobId, result: null, error: "claude-realtime.sh plan violation detected" });
+          }
+          // Otherwise keep polling (running, launching, plan_waiting, waiting, verifying, loop, etc.)
+        } catch (e: any) {
+          // Status file read error — keep polling
+        }
+      }, pollInterval);
+    });
+  });
 }
