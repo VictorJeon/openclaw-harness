@@ -396,33 +396,48 @@ async function executeTask(
     let workerResult: WorkerResult | null = null;
 
     if (isTier2Realtime) {
-      workerSessionId = buildRealtimeJobId(plan.id, task.id);
-      const realtimeResult = await executeTier2RealtimeTask(
-        task,
-        plan,
-        workdir,
-        ctx,
-        workerModel,
-        workerSessionId,
-      );
-      recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
+      const existingRealtimeJobId = checkpoint.sessions[task.id]?.worker ?? "";
+      const recoveredRealtimeResult = existingRealtimeJobId
+        ? recoverCompletedRealtimeWorkerResult(task.id, existingRealtimeJobId)
+        : null;
 
-      if (realtimeResult.status !== "done" || !realtimeResult.workerResult) {
-        updateTaskStatus(checkpoint, task.id, "failed", workdir, {
-          workerResult: realtimeResult.workerResult ?? undefined,
-        });
-        return {
-          taskId: task.id,
+      if (recoveredRealtimeResult) {
+        workerSessionId = existingRealtimeJobId;
+        workerResult = recoveredRealtimeResult;
+        console.log(
+          `[harness] Recovered completed tier2 worker from checkpoint: task=${task.id}, jobId=${workerSessionId}`,
+        );
+      } else {
+        workerSessionId = existingRealtimeJobId || buildRealtimeJobId(plan.id, task.id);
+        // Persist the realtime job id before launch/wait so resume can recover if the tool turn dies
+        recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
+
+        const realtimeResult = await executeTier2RealtimeTask(
+          task,
+          plan,
+          workdir,
+          ctx,
+          workerModel,
           workerSessionId,
-          workerResult: realtimeResult.workerResult,
-          reviewPassed: false,
-          reviewLoops: 0,
-          escalated: true,
-          error: realtimeResult.error ?? `Tier 2 realtime job ${workerSessionId} ended with status=${realtimeResult.status}`,
-        };
-      }
+        );
 
-      workerResult = realtimeResult.workerResult;
+        if (realtimeResult.status !== "done" || !realtimeResult.workerResult) {
+          updateTaskStatus(checkpoint, task.id, "failed", workdir, {
+            workerResult: realtimeResult.workerResult ?? undefined,
+          });
+          return {
+            taskId: task.id,
+            workerSessionId,
+            workerResult: realtimeResult.workerResult,
+            reviewPassed: false,
+            reviewLoops: 0,
+            escalated: true,
+            error: realtimeResult.error ?? `Tier 2 realtime job ${workerSessionId} ended with status=${realtimeResult.status}`,
+          };
+        }
+
+        workerResult = realtimeResult.workerResult;
+      }
     } else if (useSubagent) {
       // === ACP/Subagent path: real cross-model (tier 0/1 only) ===
       const workerIdempotencyKey = `harness-worker-${plan.id}-${task.id}-${Date.now()}`;
@@ -759,7 +774,7 @@ async function executeTier2RealtimeTask(
     ...launch,
     status: terminal.status,
     workerResult: {
-      taskId,
+      taskId: task.id,
       status: terminal.status === "done" ? "completed" : "failed",
       summary: terminal.summary,
       filesChanged,
@@ -972,6 +987,33 @@ function readLatestRealtimeResult(
   } catch {
     return null;
   }
+}
+
+function recoverCompletedRealtimeWorkerResult(
+  taskId: string,
+  jobId: string,
+): WorkerResult | null {
+  if (!jobId) return null;
+
+  const stateDir = join(REALTIME_STATE_ROOT, jobId);
+  const status = readRealtimeStatus(stateDir);
+  if (status !== "done") {
+    return null;
+  }
+
+  const { summary, sessionId } = buildRealtimeSummary(stateDir, status);
+  const filesChanged = extractFilePaths(summary);
+  const warnings = extractWarnings(summary);
+
+  return {
+    taskId,
+    status: "completed",
+    summary,
+    filesChanged,
+    testsRun: extractTestCount(summary),
+    warnings,
+    sessionId: sessionId ?? jobId,
+  };
 }
 
 function extractRealtimeRound(filename: string): number {
