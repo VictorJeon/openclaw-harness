@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
-import { existsSync, readFileSync, readdirSync } from "fs";
-import { homedir } from "os";
+import { randomUUID } from "crypto";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { homedir, tmpdir } from "os";
 import { basename, join, resolve } from "path";
 import { Type } from "@sinclair/typebox";
 import { sessionManager, pluginConfig, getPluginRuntime } from "../shared";
@@ -244,7 +245,17 @@ const REALTIME_SCRIPT_PATH = join(
   "scripts",
   "claude-realtime.sh",
 );
+const GIT_SYNC_SCRIPT_PATH = join(
+  homedir(),
+  ".openclaw",
+  "workspace-nova",
+  "scripts",
+  "git-sync.sh",
+);
+const REALTIME_REMOTE_HOST = process.env.OPENCLAW_REALTIME_REMOTE_HOST || "hetzner-build";
+const REALTIME_EMBEDDED_PLAN_REVIEW_ENV = "OPENCLAW_HARNESS_EMBEDDED_PLAN_REVIEW";
 const REALTIME_LAUNCH_TIMEOUT_MS = 90_000;
+const REALTIME_PULL_TIMEOUT_MS = 180_000;
 const REALTIME_POLL_INTERVAL_MS = 5_000;
 const REALTIME_MAX_WAIT_MS = 2 * 60 * 60 * 1000 + 5 * 60 * 1000;
 
@@ -258,6 +269,17 @@ interface RealtimeExecutionResult extends RealtimeLaunchResult {
   status: string;
   workerResult: WorkerResult | null;
   error?: string;
+}
+
+type PlanReviewVerdict = "PROCEED" | "REVISE" | "DONE" | "ABORT";
+
+interface EmbeddedPlanReviewResult {
+  verdict: PlanReviewVerdict;
+  body: string;
+  feedback: string;
+  rawText: string;
+  reviewerSessionId: string;
+  round: number;
 }
 
 async function executePlan(
@@ -371,7 +393,7 @@ async function executeTask(
   const workerSubagentSessionKey = !isTier2Realtime && useSubagent
     ? buildHarnessSubagentSessionKey(agentId, plan.id, task.id, "worker")
     : undefined;
-  const reviewerSubagentSessionKey = useSubagent
+  let reviewerSubagentSessionKey = useSubagent
     ? buildHarnessSubagentSessionKey(agentId, plan.id, task.id, "reviewer")
     : undefined;
 
@@ -529,7 +551,21 @@ async function executeTask(
 
         let reviewOutput = "";
 
-        if (useSubagent) {
+        if (useSubagent && reviewModel === "codex") {
+          // === Reviewer via Codex ACP (required path for final review) ===
+          console.log(
+            `[harness] Reviewer via Codex ACP: task=${task.id}, loop=${reviewLoop.history.length + 1}`,
+          );
+          const acpReview = await runCodexAcpReview(
+            reviewPrompt,
+            workdir,
+            task.id,
+            reviewLoop.history.length + 1,
+          );
+          reviewerSubagentSessionKey = acpReview.reviewerSessionId;
+          recordSession(checkpoint, task.id, "reviewer", reviewerSubagentSessionKey, workdir);
+          reviewOutput = acpReview.output;
+        } else if (useSubagent) {
           // === Reviewer via subagent.run — same reviewer session across re-reviews ===
           const isReviewerContinuation = reviewLoop.history.length > 0 || reviewerRetryCount > 0;
           const reviewerMessage = isReviewerContinuation
@@ -542,8 +578,8 @@ async function executeTask(
             idempotencyKey: `harness-review-${plan.id}-${task.id}-${reviewLoop.history.length + 1}-${Date.now()}`,
             sessionKey: reviewerSubagentSessionKey,
             message: reviewerMessage,
-            provider: reviewModel === "codex" ? "openai-codex" : "anthropic",
-            model: reviewModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
             deliver: false,
           });
           recordSession(checkpoint, task.id, "reviewer", reviewerSubagentSessionKey ?? "", workdir);
@@ -766,7 +802,12 @@ async function executeTier2RealtimeTask(
   );
 
   const launch = await launchRealtimeJob(spec, resolvedWorkdir, jobId, realtimeModel, notifyAgent);
-  const terminal = await waitForRealtimeTerminalState(launch.stateDir, launch.jobId);
+  const terminal = await waitForRealtimeTerminalState(launch.stateDir, launch.jobId, task, plan, ctx, resolvedWorkdir);
+
+  if (terminal.status === "done") {
+    await syncRealtimeWorktreeFromRemote(resolvedWorkdir);
+  }
+
   const filesChanged = extractFilePaths(terminal.summary);
   const warnings = extractWarnings(terminal.summary);
 
@@ -812,7 +853,13 @@ async function launchRealtimeJob(
     "--notify-agent",
     notifyAgent,
   ];
-  const launch = await execFileCapture("bash", args, workdir);
+  const launch = await execFileCapture(
+    "bash",
+    args,
+    workdir,
+    REALTIME_LAUNCH_TIMEOUT_MS,
+    { [REALTIME_EMBEDDED_PLAN_REVIEW_ENV]: "1" },
+  );
   const combinedOutput = [launch.stdout, launch.stderr].filter(Boolean).join("\n").trim();
   const stateDir = parseRealtimeStateDir(combinedOutput, jobId);
 
@@ -838,6 +885,8 @@ async function execFileCapture(
   command: string,
   args: string[],
   cwd: string,
+  timeoutMs = REALTIME_LAUNCH_TIMEOUT_MS,
+  envOverrides?: NodeJS.ProcessEnv,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return await new Promise((resolvePromise) => {
     execFile(
@@ -845,8 +894,8 @@ async function execFileCapture(
       args,
       {
         cwd,
-        env: process.env,
-        timeout: REALTIME_LAUNCH_TIMEOUT_MS,
+        env: { ...process.env, ...(envOverrides ?? {}) },
+        timeout: timeoutMs,
         maxBuffer: 1024 * 1024,
       },
       (error, stdout, stderr) => {
@@ -871,17 +920,119 @@ async function execFileCapture(
   });
 }
 
+async function syncRealtimeWorktreeFromRemote(workdir: string): Promise<void> {
+  if (!existsSync(GIT_SYNC_SCRIPT_PATH)) {
+    throw new Error(`git-sync.sh not found at ${GIT_SYNC_SCRIPT_PATH}`);
+  }
+
+  const result = await execFileCapture(
+    "bash",
+    [GIT_SYNC_SCRIPT_PATH, "pull", workdir, "--remote-host", REALTIME_REMOTE_HOST],
+    workdir,
+    REALTIME_PULL_TIMEOUT_MS,
+  );
+  const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+  if (result.exitCode !== 0) {
+    throw new Error(`git-sync pull failed for ${workdir}${output ? `\n${output}` : ""}`);
+  }
+
+  console.log(
+    `[harness] Tier 2 sync pull complete: workdir=${workdir}, remote=${REALTIME_REMOTE_HOST}${output ? `, output=${output}` : ""}`,
+  );
+}
+
+async function runCodexAcpReview(
+  reviewPrompt: string,
+  workdir: string,
+  taskId: string,
+  reviewAttempt: number,
+): Promise<{ output: string; reviewerSessionId: string }> {
+  const tempDir = mkdtempSync(join(tmpdir(), "harness-codex-review-"));
+  const promptPath = join(tempDir, `review-${taskId}-${reviewAttempt}.txt`);
+  writeFileSync(promptPath, `${REVIEWER_SYSTEM_PROMPT}\n\n---\n\n${reviewPrompt}\n`, "utf8");
+
+  try {
+    const command = existsSync("/opt/homebrew/bin/acpx-clean") ? "/opt/homebrew/bin/acpx-clean" : "acpx-clean";
+    const result = await execFileCapture(command, ["codex", "exec", "-f", promptPath], workdir, 300000);
+    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    if (result.exitCode !== 0 || !output) {
+      throw new Error(`Codex ACP review failed (exit ${result.exitCode})${output ? `\n${output}` : ""}`);
+    }
+    return {
+      output,
+      reviewerSessionId: `acp:codex:${Date.now()}`,
+    };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function waitForRealtimeTerminalState(
   stateDir: string,
   jobId: string,
+  task: TaskSpec,
+  plan: HarnessPlan,
+  ctx: OpenClawPluginToolContext,
+  workdir: string,
 ): Promise<{ status: string; summary: string; sessionId?: string }> {
   const startedAt = Date.now();
   let lastStatus = readRealtimeStatus(stateDir) ?? "launching";
+  const reviewedRounds = new Set<number>();
 
   while (Date.now() - startedAt < REALTIME_MAX_WAIT_MS) {
     const currentStatus = readRealtimeStatus(stateDir);
     if (currentStatus) {
       lastStatus = currentStatus;
+    }
+
+    if (lastStatus === "plan_waiting") {
+      const currentRound = detectLatestRealtimeRound(stateDir);
+      if (!reviewedRounds.has(currentRound)) {
+        reviewedRounds.add(currentRound);
+        try {
+          const review = await runEmbeddedRealtimePlanReview({
+            stateDir,
+            jobId,
+            round: currentRound,
+            task,
+            plan,
+            ctx,
+            workdir,
+          });
+
+          writeFileSync(join(stateDir, `plan-review-round-${currentRound}.raw.txt`), review.rawText, "utf8");
+          writeFileSync(join(stateDir, `plan-review-round-${currentRound}.feedback.txt`), review.feedback, "utf8");
+          writeFileSync(
+            join(stateDir, `plan-review-round-${currentRound}.source.txt`),
+            [
+              "source=embedded-agent",
+              `agent=${ctx.agentId ?? ctx.agentAccountId ?? "main"}`,
+              `reviewerSessionId=${review.reviewerSessionId}`,
+              `verdict=${review.verdict}`,
+            ].join("\n") + "\n",
+            "utf8",
+          );
+
+          await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, review.feedback);
+          console.log(
+            `[harness] Embedded plan review sent: job=${jobId}, round=${currentRound}, verdict=${review.verdict}, reviewer=${review.reviewerSessionId}`,
+          );
+        } catch (err: any) {
+          const detail = `Embedded caller-agent plan review failed for ${jobId} round ${currentRound}: ${err?.message ?? String(err)}`;
+          writeFileSync(join(stateDir, `plan-review-round-${currentRound}.error.txt`), detail + "\n", "utf8");
+          try {
+            await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, "ABORT");
+          } catch (feedbackErr: any) {
+            console.warn(
+              `[harness] Failed to send ABORT after embedded plan-review error: ${feedbackErr?.message ?? String(feedbackErr)}`,
+            );
+          }
+          return {
+            status: "error:plan-review",
+            ...buildRealtimeSummary(stateDir, "error:plan-review", detail),
+          };
+        }
+      }
     }
 
     if (isRealtimeTerminalStatus(lastStatus)) {
@@ -903,6 +1054,237 @@ async function waitForRealtimeTerminalState(
       `Timed out waiting for realtime terminal status. Last observed status: ${lastStatus}.`,
     ),
   };
+}
+
+async function runEmbeddedRealtimePlanReview(params: {
+  stateDir: string;
+  jobId: string;
+  round: number;
+  task: TaskSpec;
+  plan: HarnessPlan;
+  ctx: OpenClawPluginToolContext;
+  workdir: string;
+}): Promise<EmbeddedPlanReviewResult> {
+  const runtime = getPluginRuntime();
+  if (!runtime?.agent?.runEmbeddedPiAgent || !runtime?.config?.loadConfig) {
+    throw new Error("plugin runtime.agent.runEmbeddedPiAgent is unavailable");
+  }
+
+  const agentId = params.ctx.agentId ?? params.ctx.agentAccountId ?? "main";
+  const cfg = await runtime.config.loadConfig();
+
+  let agentDir: string | undefined;
+  try {
+    agentDir = runtime.agent.resolveAgentDir(cfg, agentId);
+  } catch {
+    agentDir = undefined;
+  }
+
+  let reviewWorkspaceDir = params.ctx.workspaceDir || process.cwd();
+  try {
+    reviewWorkspaceDir = runtime.agent.resolveAgentWorkspaceDir(cfg, agentId);
+  } catch {
+    // fall back to the invoking context workspace
+  }
+
+  const latestResult = readLatestRealtimeResult(params.stateDir);
+  let retryReason = "";
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-plan-review-"));
+    const reviewerSessionId = `harness-plan-review-${params.jobId}-r${params.round}-a${attempt}-${Date.now()}`;
+    const sessionFile = join(tempDir, "session.jsonl");
+
+    try {
+      const prompt = buildEmbeddedPlanReviewPrompt({
+        ...params,
+        agentId,
+        latestResultText: latestResult?.resultText ?? "",
+        retryReason,
+      });
+
+      const resolvedTimeoutMs = runtime.agent.resolveAgentTimeoutMs
+        ? runtime.agent.resolveAgentTimeoutMs(cfg)
+        : 240000;
+      const timeoutMs = typeof resolvedTimeoutMs === "number" && resolvedTimeoutMs > 0
+        ? Math.min(resolvedTimeoutMs, 240000)
+        : 240000;
+
+      const result = await runtime.agent.runEmbeddedPiAgent({
+        sessionId: reviewerSessionId,
+        agentId,
+        sessionFile,
+        workspaceDir: reviewWorkspaceDir,
+        agentDir,
+        config: cfg,
+        prompt,
+        timeoutMs,
+        runId: randomUUID(),
+        trigger: "manual",
+        disableTools: true,
+        bootstrapContextMode: "lightweight",
+      });
+
+      const rawText = collectEmbeddedPayloadText(result?.payloads);
+      writeFileSync(
+        join(params.stateDir, `plan-review-round-${params.round}.attempt-${attempt}.txt`),
+        rawText || "",
+        "utf8",
+      );
+
+      const parsed = parseEmbeddedPlanReviewResponse(rawText);
+      const feedback = parsed.verdict === "DONE"
+        ? "DONE"
+        : parsed.verdict === "ABORT"
+          ? "ABORT"
+          : parsed.body;
+
+      if ((parsed.verdict === "PROCEED" || parsed.verdict === "REVISE") && feedback.trim().length < 200) {
+        retryReason = `Your previous ${parsed.verdict} response was too short (${feedback.trim().length} chars). Keep the same verdict only if still correct, but rewrite the body to at least 220 characters with concrete next-step instructions for Claude Code.`;
+        continue;
+      }
+
+      return {
+        verdict: parsed.verdict,
+        body: parsed.body,
+        feedback,
+        rawText,
+        reviewerSessionId,
+        round: params.round,
+      };
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  throw new Error(`embedded plan review did not return a valid verdict/body for ${params.jobId} round ${params.round}`);
+}
+
+function buildEmbeddedPlanReviewPrompt(params: {
+  stateDir: string;
+  jobId: string;
+  round: number;
+  task: TaskSpec;
+  plan: HarnessPlan;
+  ctx: OpenClawPluginToolContext;
+  workdir: string;
+  agentId: string;
+  latestResultText: string;
+  retryReason?: string;
+}): string {
+  const latestResult = params.latestResultText.trim()
+    ? tailText(params.latestResultText, 80, 7000)
+    : "(latest Claude result unavailable)";
+  const acceptanceCriteria = params.task.acceptanceCriteria.length > 0
+    ? params.task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")
+    : "- Complete the requested change without expanding scope.";
+
+  return [
+    `You are the OpenClaw agent \`${params.agentId}\` reviewing a Claude Code planning checkpoint for the coding harness.`,
+    `The harness was invoked by this same agent, so the verdict and feedback must come from you directly.`,
+    params.retryReason ? `Retry requirement: ${params.retryReason}` : "",
+    "",
+    "Return format (strict):",
+    "- First line must be exactly one of: VERDICT: PROCEED | VERDICT: REVISE | VERDICT: DONE | VERDICT: ABORT",
+    "- If the verdict is PROCEED or REVISE, the body must be 220-1200 characters, concrete, and addressed to Claude Code.",
+    "- For PROCEED, restate the approved path, scope, constraints, and validation steps.",
+    "- For REVISE, explain exactly what is wrong and what Claude Code must change before implementing.",
+    "- For DONE or ABORT, body is optional.",
+    "- No markdown fences. No intro. No notes to Mason. No tool calls.",
+    "",
+    "Job context:",
+    `- jobId: ${params.jobId}`,
+    `- round: ${params.round}`,
+    `- repo/workdir: ${params.workdir}`,
+    `- original request: ${params.plan.originalRequest}`,
+    `- task title: ${params.task.title}`,
+    `- task scope: ${params.task.scope}`,
+    "",
+    "Acceptance criteria:",
+    acceptanceCriteria,
+    "",
+    "Latest Claude Code checkpoint:",
+    latestResult,
+  ].filter(Boolean).join("\n");
+}
+
+function parseEmbeddedPlanReviewResponse(rawText: string): { verdict: PlanReviewVerdict; body: string } {
+  const normalized = rawText.replace(/\r/g, "").trim();
+  if (!normalized) {
+    throw new Error("embedded plan review returned empty output");
+  }
+
+  const verdictStart = normalized.search(/VERDICT:/i);
+  const candidate = verdictStart >= 0 ? normalized.slice(verdictStart).trim() : normalized;
+  const verdictMatch = candidate.match(/VERDICT:\s*(PROCEED|REVISE|DONE|ABORT)/i);
+  if (!verdictMatch) {
+    throw new Error(`embedded plan review missing VERDICT. Output head: ${tailText(normalized, 8, 400)}`);
+  }
+
+  const verdict = verdictMatch[1].toUpperCase() as PlanReviewVerdict;
+  const lines = candidate.split("\n");
+  const firstVerdictLineIndex = lines.findIndex((line) => /VERDICT:/i.test(line));
+  const firstVerdictLine = firstVerdictLineIndex >= 0 ? lines[firstVerdictLineIndex] : candidate;
+  const inlineBody = firstVerdictLine
+    .replace(/.*VERDICT:\s*(?:PROCEED|REVISE|DONE|ABORT)\s*/i, "")
+    .trim();
+  const body = [inlineBody, ...lines.slice(firstVerdictLineIndex + 1)]
+    .join("\n")
+    .trim();
+
+  return { verdict, body };
+}
+
+function collectEmbeddedPayloadText(
+  payloads: Array<{ text?: string; mediaUrl?: string; mediaUrls?: string[]; isError?: boolean }> | undefined,
+): string {
+  return (payloads ?? [])
+    .map((payload) => payload?.text ?? "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+async function writeRealtimeFeedback(remoteHost: string, stateDir: string, feedback: string): Promise<void> {
+  const stateDirB64 = Buffer.from(stateDir, "utf8").toString("base64");
+  const feedbackB64 = Buffer.from(feedback, "utf8").toString("base64");
+  const python = [
+    "import base64",
+    "from pathlib import Path",
+    `state_dir = Path(base64.b64decode(\"${stateDirB64}\").decode(\"utf-8\"))`,
+    `feedback = base64.b64decode(\"${feedbackB64}\").decode(\"utf-8\")`,
+    "state_dir.mkdir(parents=True, exist_ok=True)",
+    "(state_dir / \"feedback\").write_text(feedback, encoding=\"utf-8\")",
+    "history = state_dir / \"feedback-history.log\"",
+    "fh = history.open(\"a\", encoding=\"utf-8\")",
+    "fh.write(feedback.rstrip(\"\\n\") + \"\\n\")",
+    "fh.close()",
+  ].join("; ");
+
+  const result = await execFileCapture(
+    "ssh",
+    [remoteHost, `python3 -c '${python}'`],
+    process.cwd(),
+    30000,
+  );
+
+  if (result.exitCode !== 0) {
+    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    throw new Error(`failed to write realtime feedback to ${remoteHost}:${stateDir}${output ? `\n${output}` : ""}`);
+  }
+}
+
+function detectLatestRealtimeRound(stateDir: string): number {
+  try {
+    if (!existsSync(stateDir)) return 1;
+    const resultFiles = readdirSync(stateDir)
+      .filter((name) => /^result-\d+\.json$/.test(name))
+      .sort((a, b) => extractRealtimeRound(a) - extractRealtimeRound(b));
+    if (resultFiles.length === 0) return 1;
+    return Math.max(1, extractRealtimeRound(resultFiles[resultFiles.length - 1]));
+  } catch {
+    return 1;
+  }
 }
 
 function readRealtimeStatus(stateDir: string): string | null {
