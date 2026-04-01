@@ -1,135 +1,139 @@
-# Architecture — OpenClaw Claude Code Plugin
+# Architecture
 
 ## Overview
 
-OpenClaw plugin that enables AI agents to orchestrate Claude Code sessions from messaging channels (Telegram, Discord, Rocket.Chat). Agents can spawn, monitor, resume, and manage Claude Code as background development tasks.
+OpenClaw Harness has two surfaces:
 
-## Execution Surface — Primary vs Legacy
+| Surface | Status | Purpose |
+|---------|--------|---------|
+| `harness_execute` | **primary** | automated Plan → Work → Review execution |
+| `/harness*` + legacy tools | legacy | direct PTY session control |
 
-The plugin exposes two execution paths:
+The project is now **harness-first**. New automated coding work should go through `harness_execute`.
 
-| Path | Entry point | When to use |
+---
+
+## Primary path: `harness_execute`
+
+```txt
+request
+  → router
+  → planner
+  → worker dispatch
+  → reviewer
+  → fix / re-review loop
+  → structured result
+```
+
+### Core stages
+
+1. **Router** (`src/router.ts`)
+   - classifies into tier 0 / 1 / 2
+   - simple single-feature workflows are biased toward fewer task splits
+
+2. **Planner** (`src/planner.ts`)
+   - decomposes into tasks
+   - collapses common “implement + test + README + verify + commit” requests into one task when appropriate
+
+3. **Worker execution** (`src/tools/harness-execute.ts`)
+   - tier 0: caller agent direct
+   - tier 1: harness worker session
+   - tier 2: `claude-realtime.sh` on Hetzner
+
+4. **Review loop** (`src/review-loop.ts` + `src/tools/harness-execute.ts`)
+   - reviewer checks worker output
+   - `pass` → complete
+   - `fix` → feed reviewer guidance back into the same task flow
+   - loop continues until pass or escalation
+
+5. **Checkpointing** (`src/checkpoint.ts`)
+   - per-run checkpoint on disk
+   - supports resume / recovery after interruption
+
+---
+
+## Tier model
+
+| Tier | Worker path | Review path |
 |------|-------------|-------------|
-| **Primary — Harness** | `harness_execute` | Automated coding tasks: auto-classifies complexity, decomposes into tasks, dispatches workers, runs cross-model review, returns structured results |
-| **Legacy — Direct sessions** | `harness_launch` + `harness_respond` + `harness_fg` / `harness_bg` / `harness_kill` / `harness_output` / `harness_sessions` | Interactive/multi-turn sessions requiring direct PTY access; debugging; sessions that predate the harness |
+| **0** | caller agent direct | none |
+| **1** | harness worker | Codex ACP reviewer |
+| **2** | realtime Claude worker on Hetzner | embedded caller-agent plan review + Codex ACP reviewer |
 
-The `/harness*` commands and their corresponding tool equivalents (`harness_launch`, `harness_sessions`, etc.) are the **legacy direct-session surface**. They remain fully supported but are not the recommended path for new automated coding tasks.
+### Tier 1 details
 
-## System Context
+- used for normal coding tasks
+- worker stays continuous across fix loops
+- reviewer uses a **persistent named Codex ACP session** per plan/task
+- validated in fresh smoke with multiple review loops
 
-```
-User (Telegram/Discord) → OpenClaw Gateway → Agent → Plugin Tools → Claude Code Sessions
-                                                  ↓
-                                        NotificationRouter → openclaw message send → User
-```
+### Tier 2 details
 
-## Core Components
+- used for complex/high-risk/multi-step coding tasks
+- worker runs through `claude-realtime.sh`
+- plan review is produced by the **calling agent directly** through embedded runtime review
+- feedback is written back to the realtime worker state dir
+- on completion or review-ready checkpoint, repo is synced back locally before review
+- follow-up fixes continue in the **same realtime worker session**
 
-### 1. Plugin Entry (`index.ts`)
-- Registers 8 tools, 8 commands, 5 gateway RPC methods, and 1 service
-- Creates SessionManager and NotificationRouter during service start
-- Wires outbound messaging via `openclaw message send` CLI
+---
 
-### 2. SessionManager (`src/session-manager.ts`)
-- Manages lifecycle of Claude Code processes (spawn, track, kill, resume)
-- Enforces `maxSessions` concurrent limit
-- Persists completed sessions for resume (up to `maxPersistedSessions`)
-- GC interval cleans up stale sessions every 5 minutes
+## Tier 2 runtime flow
 
-### 3. Session (`src/session.ts`)
-- Wraps a single Claude Code PTY process via `@anthropic-ai/claude-agent-sdk`
-- Handles output buffering, foreground streaming, and multi-turn conversation
-- Implements waiting-for-input detection with 15s safety-net timer
-- Double-firing guard (`waitingForInputFired`) prevents duplicate wake events
-
-### 4. NotificationRouter (`src/notifications.ts`)
-- Routes notifications to appropriate channels based on session state
-- Debounced foreground streaming (500ms per channel per session)
-- Background mode: minimal notifications (only questions and responses)
-- Long-running session reminders (>10min, once per session)
-- Completion/failure notifications in foreground only
-
-### 5. Shared State (`src/shared.ts`)
-- Module-level mutable references: `sessionManager`, `notificationRouter`, `pluginConfig`
-- Set during service `start()`, nulled during `stop()`
-
-## Data Flow
-
-### Primary Path — harness_execute
-```
-Agent calls harness_execute(request, workdir, mode)
-  → Harness classifies complexity (Tier 0 / 1 / 2)
-  → Task decomposed into sub-tasks
-  → Workers dispatched (one or more Claude Code sessions via SessionManager)
-  → Cross-model review runs against worker output
-  → Structured result returned to agent with gaps detected
-  → Agent surfaces summary + gap list to user
+```txt
+harness_execute
+  → launch claude-realtime worker
+  → worker reaches plan_waiting
+  → embedded caller-agent review generates PROCEED / REVISE / DONE / ABORT
+  → feedback written into realtime state dir
+  → worker continues
+  → sync repo back locally
+  → Codex ACP review
+  → if fix needed, feed back into same realtime worker session
+  → final DONE
 ```
 
-### Legacy Path — Direct Session Launch [LEGACY]
-```
-Agent calls harness_launch → tool validates params → SessionManager.spawn()
-  → Session created with PTY → Claude Code process starts
-  → Origin channel stored for notifications
-  → Pre-launch safety checks (autonomy skill, heartbeat config)
-```
+Key implementation points:
+- embedded plan review replaced shell-based review harvesting
+- sync-back happens before final review
+- bare repo/worktree env is injected for Hetzner worker repos
+- completed realtime workers can be recovered on resume
 
-### Waiting for Input (Wake) — Two-Tier Mechanism
-```
-Session detects idle (end-of-turn or 15s timer)
-  → NotificationRouter.onWaitingForInput()
-  → Background: 🔔 notification to origin channel
+---
 
-Wake tier 1 — Primary (spawn detached):
-  → openclaw agent --agent <id> --message <text> --deliver
-  → Spawns detached process → delivers message directly
-  → Independent of heartbeat configuration
+## Reviewer model
 
-Wake tier 2 — Fallback (system event, requires heartbeat):
-  → openclaw system event --mode now
-  → Triggers immediate heartbeat with reason="wake"
-  → Only used when originAgentId is missing
-  → REQUIRES heartbeat configured on agent (no config = silent no-op)
+### Plan review
+- tier 2 only
+- generated by the **calling agent** via embedded runtime review
+- stored in realtime state artifacts (`plan-review-round-*.source.txt`, etc.)
 
-  → Orchestrator agent wakes up, reads output, forwards to user
-```
+### Final / loop review
+- uses **Codex ACP**
+- named reviewer session persists per plan/task
+- review output is parsed into `pass` / `fix` / escalation
 
-#### Heartbeat dependency for fallback wake
+---
 
-The fallback path (`system event --mode now`) depends on the OpenClaw heartbeat pipeline:
-- It triggers an immediate heartbeat with `reason="wake"`
-- The `"wake"` reason is **not exempted** from `isHeartbeatContentEffectivelyEmpty` (unlike `"exec-event"` and `"cron:*"` reasons)
-- **Bug [#14527](https://github.com/openclaw/openclaw/issues/14527)**: If `HEARTBEAT.md` is empty or contains only comments, the wake is silently skipped — CLI returns "ok" but the agent is never woken. This is a known OpenClaw defect where the empty-content guard incorrectly applies to wake events.
-- Pre-launch checks validate that heartbeat is configured, but do not validate that `HEARTBEAT.md` has effective (non-empty, non-comment-only) content.
+## Legacy surface
 
-### Session Completion
-```
-Claude Code process exits
-  → Session status → completed/failed
-  → System event broadcast
-  → Orchestrator agent retrieves output, summarizes to user
-```
+Legacy direct-session tools remain for:
+- interactive PTY sessions
+- debugging
+- older direct Claude workflows
 
-## Key Design Decisions
+They are intentionally secondary. They do not define the current harness architecture.
 
-1. **CLI for outbound messages** — No runtime API for sending messages; uses `openclaw message send` subprocess
-2. **Two-tier wake** — Primary: detached spawn `openclaw agent --message --deliver` (no heartbeat dependency). Fallback: `openclaw system event --mode now` (requires heartbeat; see bug [#14527](https://github.com/openclaw/openclaw/issues/14527) re: empty HEARTBEAT.md)
-3. **PTY-based sessions** — Full terminal emulation for Claude Code compatibility
-4. **Background notification suppression** — Completion/failure suppressed in background; orchestrator handles user-facing summaries
-5. **maxAutoResponds limit** — Prevents infinite agent loops; resets on user interaction (`userInitiated: true`)
-6. **Channel propagation** — Tools accept optional `channel` param to route to correct user instead of falling back to "unknown"
+See `docs/safety.md` for legacy-only launch guards.
 
-## Configuration
+---
 
-See `openclaw.plugin.json` for full config schema. Key settings:
-- `maxSessions` (5) — concurrent session limit
-- `fallbackChannel` — default notification target
-- `idleTimeoutMinutes` (30) — auto-kill for idle multi-turn sessions
-- `maxAutoResponds` (10) — agent auto-respond limit per session
-- `permissionMode` (bypassPermissions) — Claude Code permission mode
+## Source files that matter most
 
-## Sharded Docs
+- `src/tools/harness-execute.ts`
+- `src/router.ts`
+- `src/planner.ts`
+- `src/review-loop.ts`
+- `src/checkpoint.ts`
 
-- [Coding Standards](architecture/coding-standards.md)
-- [Tech Stack](architecture/tech-stack.md)
-- [Source Tree](architecture/source-tree.md)
+If behavior is unclear, read those before trusting any summary doc.
