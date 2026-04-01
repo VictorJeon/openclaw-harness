@@ -447,6 +447,7 @@ async function executeTask(
           updateTaskStatus(checkpoint, task.id, "failed", workdir, {
             workerResult: realtimeResult.workerResult ?? undefined,
           });
+          const realtimeError = realtimeResult.error ?? `Tier 2 realtime job ${workerSessionId} ended with status=${realtimeResult.status}`;
           return {
             taskId: task.id,
             workerSessionId,
@@ -454,7 +455,7 @@ async function executeTask(
             reviewPassed: false,
             reviewLoops: 0,
             escalated: true,
-            error: realtimeResult.error ?? `Tier 2 realtime job ${workerSessionId} ended with status=${realtimeResult.status}`,
+            error: formatTier2FailureForCaller(ctx, workdir, realtimeError),
           };
         }
 
@@ -666,6 +667,7 @@ async function executeTask(
               reviewResult,
               workerResult: currentWorkerResult,
             });
+            const realtimeError = realtimeFinalize.error ?? `Tier 2 realtime finalization ended with status=${realtimeFinalize.status}`;
             return {
               taskId: task.id,
               workerSessionId,
@@ -673,7 +675,7 @@ async function executeTask(
               reviewPassed: false,
               reviewLoops: reviewLoop.history.length,
               escalated: true,
-              error: realtimeFinalize.error ?? `Tier 2 realtime finalization ended with status=${realtimeFinalize.status}`,
+              error: formatTier2FailureForCaller(ctx, workdir, realtimeError),
             };
           }
         }
@@ -730,6 +732,7 @@ async function executeTask(
               reviewResult,
               workerResult: realtimeFollowUp.workerResult ?? currentWorkerResult,
             });
+            const realtimeError = realtimeFollowUp.error ?? `Tier 2 realtime follow-up ended with status=${realtimeFollowUp.status}`;
             return {
               taskId: task.id,
               workerSessionId,
@@ -738,7 +741,7 @@ async function executeTask(
               reviewLoops: reviewLoop.history.length,
               escalated: true,
               escalationReason: formatEscalation(plan, reviewLoop, task),
-              error: realtimeFollowUp.error ?? `Tier 2 realtime follow-up ended with status=${realtimeFollowUp.status}`,
+              error: formatTier2FailureForCaller(ctx, workdir, realtimeError),
             };
           }
 
@@ -812,6 +815,7 @@ async function executeTask(
     };
   } catch (err: any) {
     updateTaskStatus(checkpoint, task.id, "failed", workdir);
+    const detailedError = `${err.message}\n${err.stack ?? ""}`;
     return {
       taskId: task.id,
       workerSessionId,
@@ -819,7 +823,9 @@ async function executeTask(
       reviewPassed: false,
       reviewLoops: 0,
       escalated: true,
-      error: `${err.message}\n${err.stack ?? ""}`,
+      error: isTier2Realtime
+        ? formatTier2FailureForCaller(ctx, workdir, detailedError)
+        : detailedError,
     };
   } finally {
     await cleanupHarnessSubagentSessions(runtime, [
@@ -848,7 +854,7 @@ async function executeTier2RealtimeTask(
   const resolvedWorkdir = resolve(workdir);
   const spec = buildRealtimeSpec(task, plan, resolvedWorkdir);
   const realtimeModel = resolveRealtimeModel(workerModel);
-  const notifyAgent = resolveRealtimeNotifyAgent(ctx);
+  const notifyAgent = resolveRealtimeNotifyAgent(ctx, resolvedWorkdir);
 
   console.log(
     `[harness] Tier 2 worker invoking claude-realtime.sh: script=${REALTIME_SCRIPT_PATH}, jobId=${jobId}, workdir=${resolvedWorkdir}, model=${realtimeModel}, notifyAgent=${notifyAgent}`,
@@ -1672,11 +1678,44 @@ function sanitizeRealtimeFragment(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function resolveRealtimeNotifyAgent(ctx: OpenClawPluginToolContext): string {
+function inferAgentIdFromWorkdir(workdir: string): string | undefined {
+  const normalized = resolve(workdir);
+  const workspaceMatch = normalized.match(/\/workspace-([a-zA-Z0-9_-]+)(?:\/|$)/);
+  if (workspaceMatch?.[1]) {
+    return workspaceMatch[1];
+  }
+
+  const agentsMatch = normalized.match(/\/agents\/([a-zA-Z0-9_-]+)(?:\/|$)/);
+  if (agentsMatch?.[1]) {
+    return agentsMatch[1];
+  }
+
+  return undefined;
+}
+
+function resolveCallerAgentId(ctx: OpenClawPluginToolContext): string {
   return ctx.agentId
     || ctx.agentAccountId
     || process.env.OPENCLAW_NOTIFY_AGENT_DEFAULT
     || "nova";
+}
+
+function resolveRealtimeNotifyAgent(ctx: OpenClawPluginToolContext, workdir: string): string {
+  return inferAgentIdFromWorkdir(workdir)
+    || resolveCallerAgentId(ctx);
+}
+
+function formatTier2FailureForCaller(
+  ctx: OpenClawPluginToolContext,
+  workdir: string,
+  detailedError: string,
+): string {
+  const callerAgent = resolveCallerAgentId(ctx);
+  const targetAgent = resolveRealtimeNotifyAgent(ctx, workdir);
+  if (targetAgent !== callerAgent) {
+    return `Tier 2 failure was routed to ${targetAgent}. Detailed error was sent to that agent's channel.`;
+  }
+  return detailedError;
 }
 
 function resolveRealtimeModel(workerModel: string): "opus" | "sonnet" {
