@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { basename, join, resolve } from "path";
 import { Type } from "@sinclair/typebox";
@@ -559,6 +559,7 @@ async function executeTask(
           const acpReview = await runCodexAcpReview(
             reviewPrompt,
             workdir,
+            plan.id,
             task.id,
             reviewLoop.history.length + 1,
           );
@@ -1040,6 +1041,7 @@ async function syncRealtimeWorktreeFromRemote(workdir: string): Promise<void> {
 async function runCodexAcpReview(
   reviewPrompt: string,
   workdir: string,
+  planId: string,
   taskId: string,
   reviewAttempt: number,
 ): Promise<{ output: string; reviewerSessionId: string }> {
@@ -1048,19 +1050,82 @@ async function runCodexAcpReview(
   writeFileSync(promptPath, `${REVIEWER_SYSTEM_PROMPT}\n\n---\n\n${reviewPrompt}\n`, "utf8");
 
   try {
+    const canonicalWorkdir = canonicalizeAcpWorkdir(workdir);
+    const sessionName = buildCodexReviewerSessionName(planId, taskId);
     const command = existsSync("/opt/homebrew/bin/acpx-clean") ? "/opt/homebrew/bin/acpx-clean" : "acpx-clean";
-    const result = await execFileCapture(command, ["codex", "exec", "-f", promptPath], workdir, 300000);
-    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    const sessionId = await ensureNamedCodexAcpSession(command, canonicalWorkdir, sessionName);
+    const result = await execFileCapture(
+      command,
+      ["codex", "prompt", "-s", sessionName, "-f", promptPath],
+      canonicalWorkdir,
+      300000,
+    );
+    const output = sanitizeCodexPromptOutput(result.stdout);
+    const errorOutput = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
     if (result.exitCode !== 0 || !output) {
-      throw new Error(`Codex ACP review failed (exit ${result.exitCode})${output ? `\n${output}` : ""}`);
+      throw new Error(`Codex ACP review failed (exit ${result.exitCode})${errorOutput ? `\n${errorOutput}` : ""}`);
     }
     return {
       output,
-      reviewerSessionId: `acp:codex:${Date.now()}`,
+      reviewerSessionId: `acp:codex:${sessionId}`,
     };
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+function canonicalizeAcpWorkdir(workdir: string): string {
+  try {
+    return realpathSync(workdir);
+  } catch {
+    return resolve(workdir);
+  }
+}
+
+function buildCodexReviewerSessionName(planId: string, taskId: string): string {
+  return `harness-review-${planId}-${taskId}`.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
+}
+
+async function ensureNamedCodexAcpSession(
+  command: string,
+  workdir: string,
+  sessionName: string,
+): Promise<string> {
+  const shown = await execFileCapture(command, ["codex", "sessions", "show", sessionName], workdir, 30000);
+  if (shown.exitCode === 0) {
+    const existingId = parseCodexSessionId(shown.stdout);
+    if (existingId) return existingId;
+  }
+
+  const created = await execFileCapture(command, ["codex", "sessions", "new", "--name", sessionName], workdir, 60000);
+  if (created.exitCode !== 0) {
+    const output = [created.stdout, created.stderr].filter(Boolean).join("\n").trim();
+    throw new Error(`Failed to create Codex ACP reviewer session ${sessionName}${output ? `\n${output}` : ""}`);
+  }
+
+  const confirmed = await execFileCapture(command, ["codex", "sessions", "show", sessionName], workdir, 30000);
+  if (confirmed.exitCode !== 0) {
+    const output = [confirmed.stdout, confirmed.stderr].filter(Boolean).join("\n").trim();
+    throw new Error(`Failed to confirm Codex ACP reviewer session ${sessionName}${output ? `\n${output}` : ""}`);
+  }
+
+  const sessionId = parseCodexSessionId(confirmed.stdout);
+  if (!sessionId) {
+    throw new Error(`Unable to parse Codex ACP reviewer session id for ${sessionName}`);
+  }
+  return sessionId;
+}
+
+function parseCodexSessionId(output: string): string | null {
+  const match = output.match(/^id:\s*([^\s]+)$/m);
+  return match?.[1]?.trim() || null;
+}
+
+function sanitizeCodexPromptOutput(stdout: string): string {
+  return stdout
+    .replace(/\r/g, "")
+    .replace(/^\s*\[done\]\s*end_turn\s*$/gim, "")
+    .trim();
 }
 
 async function waitForRealtimeTerminalState(
