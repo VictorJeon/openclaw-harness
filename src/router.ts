@@ -86,6 +86,14 @@ export function classifyRequest(request: string): RouteResult {
     }
   }
 
+  if (isLikelySingleFeatureWorkflow(request)) {
+    return {
+      tier: 1,
+      confidence: "keyword",
+      reason: "Single-feature workflow detected (implementation + test/docs/verify grouped as one task)",
+    };
+  }
+
   // Layer 2: Keyword scoring
   let tier1Score = 0;
   let tier2Score = 0;
@@ -154,6 +162,10 @@ export function classifyRequest(request: string): RouteResult {
  * Looks for numbered lists, commas with verbs, "and" conjunctions, etc.
  */
 function countTasks(request: string): number {
+  if (isLikelySingleFeatureWorkflow(request)) {
+    return 1;
+  }
+
   // Count numbered items (1. 2. 3. or 1) 2) 3))
   const numbered = request.match(/(?:^|\n)\s*\d+[.)]/g);
   if (numbered && numbered.length >= 2) return numbered.length;
@@ -171,4 +183,22 @@ function countTasks(request: string): number {
   if (commaSegments.length >= 3) return commaSegments.length;
 
   return 0;
+}
+
+function isLikelySingleFeatureWorkflow(request: string): boolean {
+  const normalized = request.toLowerCase();
+  if (/(migration|migrate|rewrite|architecture|system|integration|infra|multiple files|large scale|마이그레이션|재작성|아키텍처|시스템|통합|인프라|여러 파일|대규모)/i.test(request)) {
+    return false;
+  }
+
+  const explicitFiles = request.match(/[\w\-./]+\.\w{1,5}/g) ?? [];
+  if (explicitFiles.length > 3) {
+    return false;
+  }
+
+  const hasImplementation = /(create|add|update|modify|implement|write|build|make|생성|추가|수정|구현|작성|만들)/i.test(request);
+  const hasSupportSteps = /(readme|pytest|test|verify|validation|commit|usage|example|readable|minimal|simple|문서|테스트|검증|커밋|예시|간단|최소)/i.test(request);
+  const hasMultiAreaSignals = /(backend and frontend|frontend and backend|api and ui|여러 서비스|여러 컴포넌트|서로 다른 모듈)/i.test(normalized);
+
+  return hasImplementation && hasSupportSteps && !hasMultiAreaSignals;
 }

@@ -186,8 +186,12 @@ function decomposeTasks(request: string): TaskSpec[] {
   // Try to split by numbered items
   const numbered = request.match(/\d+[.)]\s+[^\n]+/g);
   if (numbered && numbered.length >= 2) {
-    for (let i = 0; i < numbered.length; i++) {
-      const text = numbered[i].replace(/^\d+[.)]\s+/, "").trim();
+    const numberedItems = numbered.map((item) => item.replace(/^\d+[.)]\s+/, "").trim());
+    if (shouldCollapseIntoSingleTask(request, numberedItems)) {
+      return [buildSingleTask(request)];
+    }
+    for (let i = 0; i < numberedItems.length; i++) {
+      const text = numberedItems[i];
       tasks.push({
         id: nextTaskId(i),
         title: extractTitle(text),
@@ -202,9 +206,13 @@ function decomposeTasks(request: string): TaskSpec[] {
   // Try to split by bullet points — extract only the bullet lines, skip preamble
   const bulletMatches = request.match(/(?:^|\n)\s*[-•*]\s+[^\n]+/g);
   if (bulletMatches && bulletMatches.length >= 2) {
-    for (let i = 0; i < bulletMatches.length; i++) {
-      const text = bulletMatches[i].replace(/^\s*[-•*]\s+/, "").trim();
-      if (text.length < 5) continue;
+    const bulletItems = bulletMatches
+      .map((item) => item.replace(/^\s*[-•*]\s+/, "").trim())
+      .filter((text) => text.length >= 5);
+    if (shouldCollapseIntoSingleTask(request, bulletItems)) {
+      return [buildSingleTask(request)];
+    }
+    for (const text of bulletItems) {
       tasks.push({
         id: nextTaskId(tasks.length),
         title: extractTitle(text),
@@ -217,16 +225,46 @@ function decomposeTasks(request: string): TaskSpec[] {
     tasks.length = 0; // reset if only 1 valid bullet
   }
 
-  // Single complex task
-  tasks.push({
+  return [buildSingleTask(request)];
+}
+
+function buildSingleTask(request: string): TaskSpec {
+  return {
     id: nextTaskId(0),
     title: extractTitle(request),
     scope: request,
     acceptanceCriteria: extractAcceptanceCriteria(request),
     agent: "codex",
-  });
+  };
+}
 
-  return tasks;
+function shouldCollapseIntoSingleTask(request: string, candidateItems: string[]): boolean {
+  if (candidateItems.length === 0 || candidateItems.length > 5) {
+    return false;
+  }
+
+  const combined = [request, ...candidateItems].join("\n");
+  if (/(migration|migrate|rewrite|architecture|system|integration|infra|large scale|마이그레이션|재작성|아키텍처|시스템|통합|인프라|대규모)/i.test(combined)) {
+    return false;
+  }
+
+  const explicitFiles = extractScopeFiles(combined);
+  if (explicitFiles.length > 3) {
+    return false;
+  }
+
+  const workflowishItems = candidateItems.filter(isSingleFeatureWorkflowItem);
+  const hasSupportingWorkflow = workflowishItems.length >= Math.max(1, candidateItems.length - 1);
+  const hasVerification = /(pytest|test|verify|validation|검증|테스트)/i.test(combined);
+  const hasDocs = /(readme|usage|example|문서|예시)/i.test(combined);
+  const hasCommit = /(\bcommit\b|커밋)/i.test(combined);
+  const hasMinimalitySignal = /(minimal|simple|keep it minimal|readable|간단|최소|작게)/i.test(combined);
+
+  return hasSupportingWorkflow && (hasVerification || hasDocs || hasCommit || hasMinimalitySignal);
+}
+
+function isSingleFeatureWorkflowItem(text: string): boolean {
+  return /^(?:create|add|update|modify|implement|write|run|verify|commit)\b|^(?:생성|추가|수정|구현|작성|실행|검증|커밋)\b|\b(readme|pytest|test|commit|usage|example|verify|validation)\b|\b(문서|테스트|검증|예시|커밋)\b/i.test(text);
 }
 
 function canParallelize(tasks: TaskSpec[]): boolean {
