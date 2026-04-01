@@ -443,7 +443,7 @@ async function executeTask(
           workerSessionId,
         );
 
-        if (realtimeResult.status !== "done" || !realtimeResult.workerResult) {
+        if (!isRealtimeReviewReadyStatus(realtimeResult.status) || !realtimeResult.workerResult) {
           updateTaskStatus(checkpoint, task.id, "failed", workdir, {
             workerResult: realtimeResult.workerResult ?? undefined,
           });
@@ -647,10 +647,41 @@ async function executeTask(
       console.log(`[harness] Review result: task=${task.id}, action=${action.action}, gaps=${reviewResult.gaps.length}`);
 
       if (action.action === "pass") {
+        if (isTier2Realtime) {
+          const realtimeFinalize = await finalizeTier2RealtimeTask(
+            task,
+            plan,
+            workdir,
+            ctx,
+            workerSessionId,
+          );
+          if (realtimeFinalize.workerResult) {
+            currentWorkerResult = realtimeFinalize.workerResult;
+          }
+          if (realtimeFinalize.status !== "done") {
+            updateTaskStatus(checkpoint, task.id, "failed", workdir, {
+              reviewPassed: false,
+              reviewLoop: reviewLoop.currentLoop,
+              reviewResult,
+              workerResult: currentWorkerResult,
+            });
+            return {
+              taskId: task.id,
+              workerSessionId,
+              workerResult: currentWorkerResult,
+              reviewPassed: false,
+              reviewLoops: reviewLoop.history.length,
+              escalated: true,
+              error: realtimeFinalize.error ?? `Tier 2 realtime finalization ended with status=${realtimeFinalize.status}`,
+            };
+          }
+        }
+
         updateTaskStatus(checkpoint, task.id, "completed", workdir, {
           reviewPassed: true,
           reviewLoop: reviewLoop.currentLoop,
           reviewResult,
+          workerResult: currentWorkerResult,
         });
         return {
           taskId: task.id,
@@ -682,21 +713,42 @@ async function executeTask(
       // action === "fix": spawn a fixer session with gap feedback
       if (action.action === "fix") {
         if (isTier2Realtime) {
-          updateTaskStatus(checkpoint, task.id, "failed", workdir, {
+          const realtimeFollowUp = await continueTier2RealtimeTask(
+            task,
+            plan,
+            workdir,
+            ctx,
+            workerSessionId,
+            action.fixPrompt,
+          );
+
+          if (!isRealtimeReviewReadyStatus(realtimeFollowUp.status) || !realtimeFollowUp.workerResult) {
+            updateTaskStatus(checkpoint, task.id, "failed", workdir, {
+              reviewPassed: false,
+              reviewLoop: reviewLoop.currentLoop,
+              reviewResult,
+              workerResult: realtimeFollowUp.workerResult ?? currentWorkerResult,
+            });
+            return {
+              taskId: task.id,
+              workerSessionId,
+              workerResult: realtimeFollowUp.workerResult ?? currentWorkerResult,
+              reviewPassed: false,
+              reviewLoops: reviewLoop.history.length,
+              escalated: true,
+              escalationReason: formatEscalation(plan, reviewLoop, task),
+              error: realtimeFollowUp.error ?? `Tier 2 realtime follow-up ended with status=${realtimeFollowUp.status}`,
+            };
+          }
+
+          currentWorkerResult = realtimeFollowUp.workerResult;
+          updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
             reviewPassed: false,
             reviewLoop: reviewLoop.currentLoop,
             reviewResult,
-          });
-          return {
-            taskId: task.id,
-            workerSessionId,
             workerResult: currentWorkerResult,
-            reviewPassed: false,
-            reviewLoops: reviewLoop.history.length,
-            escalated: true,
-            escalationReason: formatEscalation(plan, reviewLoop, task),
-            error: "Tier 2 realtime follow-up fixes are deferred until same-session ping-pong is wired. The realtime run completed, but reviewer-requested fixes still require manual follow-up.",
-          };
+          });
+          continue;
         }
 
         const fixBudget = Math.min(perPhaseBudget, remainingBudget);
@@ -802,30 +854,74 @@ async function executeTier2RealtimeTask(
   );
 
   const launch = await launchRealtimeJob(spec, resolvedWorkdir, jobId, realtimeModel, notifyAgent);
-  const terminal = await waitForRealtimeTerminalState(launch.stateDir, launch.jobId, task, plan, ctx, resolvedWorkdir);
+  return await waitForTier2RealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, launch.jobId, launch.stateDir, "round-complete");
+}
 
-  if (terminal.status === "done") {
-    await syncRealtimeWorktreeFromRemote(resolvedWorkdir);
+async function continueTier2RealtimeTask(
+  task: TaskSpec,
+  plan: HarnessPlan,
+  workdir: string,
+  ctx: OpenClawPluginToolContext,
+  jobId: string,
+  feedback: string,
+): Promise<RealtimeExecutionResult> {
+  const resolvedWorkdir = resolve(workdir);
+  const stateDir = join(REALTIME_STATE_ROOT, jobId);
+  await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, feedback);
+  console.log(`[harness] Tier 2 follow-up feedback sent: jobId=${jobId}`);
+  return await waitForTier2RealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, jobId, stateDir, "round-complete");
+}
+
+async function finalizeTier2RealtimeTask(
+  task: TaskSpec,
+  plan: HarnessPlan,
+  workdir: string,
+  ctx: OpenClawPluginToolContext,
+  jobId: string,
+): Promise<RealtimeExecutionResult> {
+  const resolvedWorkdir = resolve(workdir);
+  const stateDir = join(REALTIME_STATE_ROOT, jobId);
+  const currentStatus = readRealtimeStatus(stateDir);
+  if (currentStatus !== "done") {
+    await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, "DONE");
+    console.log(`[harness] Tier 2 final DONE sent: jobId=${jobId}, previousStatus=${currentStatus ?? "missing"}`);
+  }
+  return await waitForTier2RealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, jobId, stateDir, "terminal");
+}
+
+async function waitForTier2RealtimeCheckpoint(
+  task: TaskSpec,
+  plan: HarnessPlan,
+  workdir: string,
+  ctx: OpenClawPluginToolContext,
+  jobId: string,
+  stateDir: string,
+  goal: "round-complete" | "terminal",
+): Promise<RealtimeExecutionResult> {
+  const terminal = await waitForRealtimeTerminalState(
+    stateDir,
+    jobId,
+    task,
+    plan,
+    ctx,
+    workdir,
+    goal,
+  );
+
+  if (terminal.status === "waiting" || terminal.status === "done") {
+    await syncRealtimeWorktreeFromRemote(workdir);
   }
 
-  const filesChanged = extractFilePaths(terminal.summary);
-  const warnings = extractWarnings(terminal.summary);
-
+  const workerResult = buildRealtimeWorkerResult(task.id, terminal.status, terminal.summary, terminal.sessionId ?? jobId);
   return {
-    ...launch,
+    jobId,
+    stateDir,
+    output: terminal.summary,
     status: terminal.status,
-    workerResult: {
-      taskId: task.id,
-      status: terminal.status === "done" ? "completed" : "failed",
-      summary: terminal.summary,
-      filesChanged,
-      testsRun: terminal.status === "done" ? extractTestCount(terminal.summary) : 0,
-      warnings,
-      sessionId: terminal.sessionId ?? launch.jobId,
-    },
-    error: terminal.status === "done"
+    workerResult,
+    error: isRealtimeReviewReadyStatus(terminal.status) || terminal.status === "done"
       ? undefined
-      : formatRealtimeFailure(launch.jobId, launch.stateDir, terminal.status, terminal.summary),
+      : formatRealtimeFailure(jobId, stateDir, terminal.status, terminal.summary),
   };
 }
 
@@ -974,6 +1070,7 @@ async function waitForRealtimeTerminalState(
   plan: HarnessPlan,
   ctx: OpenClawPluginToolContext,
   workdir: string,
+  goal: "round-complete" | "terminal" = "terminal",
 ): Promise<{ status: string; summary: string; sessionId?: string }> {
   const startedAt = Date.now();
   let lastStatus = readRealtimeStatus(stateDir) ?? "launching";
@@ -1035,6 +1132,13 @@ async function waitForRealtimeTerminalState(
       }
     }
 
+    if (goal === "round-complete" && lastStatus === "waiting") {
+      return {
+        status: lastStatus,
+        ...buildRealtimeSummary(stateDir, lastStatus),
+      };
+    }
+
     if (isRealtimeTerminalStatus(lastStatus)) {
       return {
         status: lastStatus,
@@ -1051,7 +1155,7 @@ async function waitForRealtimeTerminalState(
     ...buildRealtimeSummary(
       stateDir,
       timeoutStatus,
-      `Timed out waiting for realtime terminal status. Last observed status: ${lastStatus}.`,
+      `Timed out waiting for realtime ${goal}. Last observed status: ${lastStatus}.`,
     ),
   };
 }
@@ -1090,7 +1194,8 @@ async function runEmbeddedRealtimePlanReview(params: {
   const latestResult = readLatestRealtimeResult(params.stateDir);
   let retryReason = "";
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  let lastError: string | null = null;
+  for (let attempt = 1; attempt <= 4; attempt++) {
     const tempDir = mkdtempSync(join(tmpdir(), "harness-plan-review-"));
     const reviewerSessionId = `harness-plan-review-${params.jobId}-r${params.round}-a${attempt}-${Date.now()}`;
     const sessionFile = join(tempDir, "session.jsonl");
@@ -1152,12 +1257,24 @@ async function runEmbeddedRealtimePlanReview(params: {
         reviewerSessionId,
         round: params.round,
       };
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      lastError = message;
+      if (!isTransientEmbeddedReviewError(message) || attempt >= 4) {
+        throw err;
+      }
+      const backoffMs = Math.min(5000 * attempt, 15000);
+      console.warn(
+        `[harness] Embedded plan review transient failure: job=${params.jobId}, round=${params.round}, attempt=${attempt}/4, retryInMs=${backoffMs}, error=${message}`,
+      );
+      await sleep(backoffMs);
+      continue;
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }
 
-  throw new Error(`embedded plan review did not return a valid verdict/body for ${params.jobId} round ${params.round}`);
+  throw new Error(lastError ?? `embedded plan review did not return a valid verdict/body for ${params.jobId} round ${params.round}`);
 }
 
 function buildEmbeddedPlanReviewPrompt(params: {
@@ -1233,6 +1350,10 @@ function parseEmbeddedPlanReviewResponse(rawText: string): { verdict: PlanReview
     .trim();
 
   return { verdict, body };
+}
+
+function isTransientEmbeddedReviewError(message: string): boolean {
+  return /(temporarily overloaded|overloaded|rate limit|try again in a moment|timeout|timed out|temporarily unavailable)/i.test(message);
 }
 
 function collectEmbeddedPayloadText(
@@ -1371,6 +1492,27 @@ function readLatestRealtimeResult(
   }
 }
 
+function isRealtimeReviewReadyStatus(status: string): boolean {
+  return status === "waiting" || status === "done";
+}
+
+function buildRealtimeWorkerResult(
+  taskId: string,
+  status: string,
+  summary: string,
+  sessionId: string,
+): WorkerResult {
+  return {
+    taskId,
+    status: isRealtimeReviewReadyStatus(status) ? "completed" : "failed",
+    summary,
+    filesChanged: extractFilePaths(summary),
+    testsRun: extractTestCount(summary),
+    warnings: extractWarnings(summary),
+    sessionId,
+  };
+}
+
 function recoverCompletedRealtimeWorkerResult(
   taskId: string,
   jobId: string,
@@ -1384,18 +1526,7 @@ function recoverCompletedRealtimeWorkerResult(
   }
 
   const { summary, sessionId } = buildRealtimeSummary(stateDir, status);
-  const filesChanged = extractFilePaths(summary);
-  const warnings = extractWarnings(summary);
-
-  return {
-    taskId,
-    status: "completed",
-    summary,
-    filesChanged,
-    testsRun: extractTestCount(summary),
-    warnings,
-    sessionId: sessionId ?? jobId,
-  };
+  return buildRealtimeWorkerResult(taskId, status, summary, sessionId ?? jobId);
 }
 
 function extractRealtimeRound(filename: string): number {
