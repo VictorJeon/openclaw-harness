@@ -386,6 +386,14 @@ async function executeTask(
 ): Promise<TaskExecutionResult> {
   const workerModel = pluginConfig.workerModel ?? "claude";
   const reviewModel = pluginConfig.reviewModel ?? "codex";
+  const resolvedWorkerSubagentModel = resolveSubagentProviderAndModel(workerModel, {
+    provider: "anthropic",
+    model: "claude-sonnet-4-6",
+  });
+  const resolvedReviewerSubagentModel = resolveSubagentProviderAndModel(reviewModel, {
+    provider: "openai-codex",
+    model: "gpt-5.4",
+  });
   const isTier2Realtime = plan.tier === 2;
   const runtime = getPluginRuntime();
   const useSubagent = runtime?.subagent?.run != null;
@@ -474,8 +482,8 @@ async function executeTask(
           ``,
           workerPrompt,
         ].join("\n"),
-        provider: workerModel === "codex" ? "openai-codex" : "anthropic",
-        model: workerModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+        provider: resolvedWorkerSubagentModel.provider,
+        model: resolvedWorkerSubagentModel.model,
         deliver: false,
       };
       console.log(`[harness] Worker subagent.run params: ${JSON.stringify(workerRunParams)}`);
@@ -488,6 +496,9 @@ async function executeTask(
         throw new Error(`Worker subagent failed: ${completion.error ?? "unknown"}`);
       }
       const lastMsg = await getLatestSubagentAssistantText(runtime, workerSessionId, "worker");
+      if (!lastMsg.trim()) {
+        throw new Error(`Worker subagent completed without persisted assistant output: ${workerSessionId}`);
+      }
       workerResult = parseWorkerOutput(lastMsg, task.id);
     } else {
       // === Fallback: sessionManager.spawn (CC PTY) ===
@@ -580,8 +591,8 @@ async function executeTask(
             idempotencyKey: `harness-review-${plan.id}-${task.id}-${reviewLoop.history.length + 1}-${Date.now()}`,
             sessionKey: reviewerSubagentSessionKey,
             message: reviewerMessage,
-            provider: "anthropic",
-            model: "claude-sonnet-4-6",
+            provider: resolvedReviewerSubagentModel.provider,
+            model: resolvedReviewerSubagentModel.model,
             deliver: false,
           });
           recordSession(checkpoint, task.id, "reviewer", reviewerSubagentSessionKey ?? "", workdir);
@@ -591,6 +602,9 @@ async function executeTask(
             reviewerSubagentSessionKey ?? "",
             "reviewer",
           );
+          if (!reviewOutput.trim()) {
+            throw new Error(`Reviewer subagent completed without persisted assistant output: ${reviewerSubagentSessionKey ?? "unknown"}`);
+          }
         } else {
           // === Fallback: sessionManager.spawn ===
           const reviewerSession = sessionManager!.spawn({
@@ -828,10 +842,11 @@ async function executeTask(
         : detailedError,
     };
   } finally {
-    await cleanupHarnessSubagentSessions(runtime, [
-      workerSubagentSessionKey,
-      reviewerSubagentSessionKey,
-    ]);
+    // Do not eagerly delete harness subagent sessions here.
+    // OpenClaw can still be flushing transcript/tool-result state shortly after
+    // waitForRun() resolves; deleting immediately risks racing persistence and
+    // produces missing-transcript / transcript-repair failures that make
+    // harness runs look like instant worker crashes.
   }
 }
 
@@ -1722,6 +1737,65 @@ function resolveRealtimeModel(workerModel: string): "opus" | "sonnet" {
   return workerModel.toLowerCase().includes("opus") ? "opus" : "sonnet";
 }
 
+function resolveSubagentProviderAndModel(
+  requestedModel: string,
+  fallback: { provider: string; model: string },
+): { provider: string; model: string } {
+  const raw = (requestedModel ?? "").trim();
+  const lower = raw.toLowerCase();
+
+  if (!raw) {
+    return fallback;
+  }
+
+  if (raw.includes("/")) {
+    const [provider, model] = raw.split("/", 2);
+    if (provider && model) {
+      return { provider, model };
+    }
+  }
+
+  if (
+    lower === "codex"
+    || lower === "gpt5.4"
+    || lower === "gpt-5.4"
+    || lower === "gpt"
+  ) {
+    return { provider: "openai-codex", model: "gpt-5.4" };
+  }
+
+  if (
+    lower === "opus"
+    || lower === "opus46"
+    || lower === "claude-opus-4-6"
+  ) {
+    return { provider: "anthropic", model: "claude-opus-4-6" };
+  }
+
+  if (
+    lower === "claude"
+    || lower === "sonnet"
+    || lower === "sonnet46"
+    || lower === "claude-sonnet-4-6"
+  ) {
+    return { provider: "anthropic", model: "claude-sonnet-4-6" };
+  }
+
+  if (lower.includes("codex") || lower.startsWith("gpt")) {
+    return { provider: "openai-codex", model: "gpt-5.4" };
+  }
+
+  if (lower.includes("opus")) {
+    return { provider: "anthropic", model: "claude-opus-4-6" };
+  }
+
+  if (lower.includes("claude") || lower.includes("sonnet")) {
+    return { provider: "anthropic", model: "claude-sonnet-4-6" };
+  }
+
+  return fallback;
+}
+
 function buildHarnessSubagentSessionKey(
   agentId: string,
   planId: string,
@@ -1738,15 +1812,32 @@ async function getLatestSubagentAssistantText(
   sessionKey: string,
   role: "worker" | "reviewer",
 ): Promise<string> {
-  const msgs = await runtime.subagent.getSessionMessages({ sessionKey, limit: 5 });
-  console.log(
-    `[harness] ${role} getSessionMessages: key=${sessionKey}, count=${msgs?.messages?.length ?? 0}`,
-  );
-  const rawContent = msgs?.messages?.filter((m: any) => m.role === "assistant")?.pop()?.content ?? "";
-  console.log(
-    `[harness] ${role} rawContent type=${typeof rawContent}, isArray=${Array.isArray(rawContent)}`,
-  );
-  return flattenSubagentMessageContent(rawContent);
+  const maxAttempts = 8;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const msgs = await runtime.subagent.getSessionMessages({ sessionKey, limit: 10 });
+    console.log(
+      `[harness] ${role} getSessionMessages: key=${sessionKey}, attempt=${attempt}/${maxAttempts}, count=${msgs?.messages?.length ?? 0}`,
+    );
+
+    const assistants = msgs?.messages?.filter((m: any) => m.role === "assistant") ?? [];
+    const rawContent = assistants.pop()?.content ?? "";
+    const flattened = flattenSubagentMessageContent(rawContent).trim();
+
+    console.log(
+      `[harness] ${role} rawContent type=${typeof rawContent}, isArray=${Array.isArray(rawContent)}, textChars=${flattened.length}`,
+    );
+
+    if (flattened) {
+      return flattened;
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(250 * attempt, 1000)));
+    }
+  }
+
+  return "";
 }
 
 function flattenSubagentMessageContent(content: any): string {
