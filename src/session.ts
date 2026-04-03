@@ -59,6 +59,7 @@ export class Session {
   readonly workdir: string;
   readonly model?: string;
   readonly maxBudgetUsd: number;
+  readonly internal: boolean;
   private readonly systemPrompt?: string;
   private readonly allowedTools?: string[];
   private readonly permissionMode: PermissionMode;
@@ -143,6 +144,7 @@ export class Session {
     this.workdir = config.workdir;
     this.model = resolveModelAlias(config.model);
     this.maxBudgetUsd = config.maxBudgetUsd;
+    this.internal = config.internal ?? false;
     this.systemPrompt = config.systemPrompt;
     this.allowedTools = config.allowedTools;
     this.permissionMode = config.permissionMode ?? pluginConfig.permissionMode ?? "bypassPermissions";

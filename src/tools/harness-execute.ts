@@ -1,7 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { sessionManager, pluginConfig } from "../shared";
 import { classifyRequest } from "../router";
-import { buildPlan, searchMemory } from "../planner";
+import { buildPlan, buildModelPlan, searchMemory } from "../planner";
 import { initCheckpoint, loadCheckpoint, updateTaskStatus, recordSession } from "../checkpoint";
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
@@ -138,7 +138,12 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
         (mode === "delegate" && tier === 2);
 
       if (needsApproval) {
-        const plan = buildPlan(params.request, tier > 0 ? tier : 1);
+        const planningTier: 1 | 2 = tier === 2 ? 2 : 1;
+        const memoryContext = planningTier === 2
+          ? await loadPlanningMemory(workdir)
+          : "";
+        const plan = await createExecutionPlan(params.request, planningTier, memoryContext, workdir);
+
         // Persist the plan so approved_plan_id can load it later
         const checkpoint = initCheckpoint(plan, workdir);
         checkpoint.status = "running"; // mark as awaiting approval
@@ -169,15 +174,12 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       }
 
       // Step 3: Memory V3 prefetch (best-effort)
-      let memoryContext = "";
-      try {
-        memoryContext = await searchMemory(workdir.split("/").pop() ?? "project");
-      } catch {
-        // non-fatal
-      }
+      const memoryContext = tier === 2
+        ? await loadPlanningMemory(workdir)
+        : "";
 
       // Step 4: Plan
-      const plan = buildPlan(params.request, tier, memoryContext);
+      const plan = await createExecutionPlan(params.request, tier, memoryContext, workdir);
       console.log(`[harness] Plan: id=${plan.id}, tasks=${plan.tasks.length}, mode=${plan.mode}`);
 
       // Step 5: Initialize checkpoint
@@ -195,6 +197,27 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       };
     },
   };
+}
+
+async function loadPlanningMemory(workdir: string): Promise<string> {
+  try {
+    return await searchMemory(workdir.split("/").pop() ?? "project");
+  } catch {
+    return "";
+  }
+}
+
+async function createExecutionPlan(
+  request: string,
+  tier: 1 | 2,
+  memoryContext: string,
+  workdir: string,
+): Promise<HarnessPlan> {
+  if (tier === 2) {
+    return buildModelPlan(request, memoryContext, workdir);
+  }
+
+  return buildPlan(request, tier, memoryContext);
 }
 
 // --- Orchestration ---
@@ -657,10 +680,11 @@ function formatPlanForApproval(
   const lines = [
     `## Harness: Plan Requires Approval`,
     ``,
-    `**Tier:** ${route.tier} (${route.confidence})`,
+    `**Tier:** ${plan.tier} (${route.confidence})`,
     `**Mode:** ${mode}`,
     `**Plan ID:** ${plan.id}`,
     `**Tasks:** ${plan.tasks.length} (${plan.mode})`,
+    ...formatPlannerMetadata(plan.plannerMetadata),
     ``,
     `### Tasks`,
   ];
@@ -685,6 +709,20 @@ function formatPlanForApproval(
   return lines.join("\n");
 }
 
+function formatPlannerMetadata(metadata?: HarnessPlan["plannerMetadata"]): string[] {
+  if (!metadata) return [];
+
+  const lines = [
+    `**Planner:** ${metadata.backend}${metadata.model ? ` | model=${metadata.model}` : ""} | fallback=${metadata.fallback ? "yes" : "no"}`,
+  ];
+
+  if (metadata.fallbackReason) {
+    lines.push(`**Planner fallback:** ${metadata.fallbackReason}`);
+  }
+
+  return lines;
+}
+
 function formatFinalResult(
   plan: HarnessPlan,
   route: ReturnType<typeof classifyRequest>,
@@ -702,9 +740,10 @@ function formatFinalResult(
   const lines = [
     `## Harness: ${status === "success" ? "Complete" : status === "escalated" ? "Escalation Required" : "Partial Completion"}`,
     ``,
-    `**Tier:** ${route.tier} | **Mode:** ${mode} | **Plan:** ${plan.id}`,
+    `**Tier:** ${plan.tier} (${route.confidence}) | **Mode:** ${mode} | **Plan:** ${plan.id}`,
     `**Result:** ${passed}/${results.length} passed | ${totalLoops} review loops`,
     `**Checkpoint:** ${checkpoint.runId}`,
+    ...formatPlannerMetadata(plan.plannerMetadata),
     ``,
     `### Task Results`,
   ];

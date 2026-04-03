@@ -93,6 +93,67 @@ Return:
   }
 }
 
+async function testModelPlannerFallsBackToSonnet() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    const plan = await planner.buildModelPlan(
+      "Implement internal planner fallback coverage",
+      "",
+      "/tmp/project",
+      async ({ requestedModel }) => {
+        if (requestedModel === "opus") {
+          throw new Error("primary planner unavailable");
+        }
+
+        return {
+          launchModel: requestedModel,
+          output: `tasks:
+  - id: task-1
+    title: "Implement internal planner fallback coverage"
+    scope: "src/planner.ts"
+    acceptance_criteria:
+      - "planner metadata records fallback"
+    agent: codex
+mode: solo
+estimated_complexity: medium`,
+        };
+      },
+    );
+
+    assert.equal(plan.plannerMetadata.backend, "model");
+    assert.equal(plan.plannerMetadata.model, "sonnet");
+    assert.equal(plan.plannerMetadata.fallback, true);
+    assert.match(plan.plannerMetadata.fallbackReason, /opus: primary planner unavailable/);
+    assert.equal(plan.tasks.length, 1);
+  } finally {
+    cleanup();
+  }
+}
+
+async function testModelPlannerFallsBackToHeuristic() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    const plan = await planner.buildModelPlan(
+      `1) Fix planner integration\n2) Add fallback metadata`,
+      "",
+      "/tmp/project",
+      async ({ requestedModel }) => {
+        throw new Error(`planner failed for ${requestedModel}`);
+      },
+    );
+
+    assert.equal(plan.plannerMetadata.backend, "heuristic");
+    assert.equal(plan.plannerMetadata.fallback, true);
+    assert.match(plan.plannerMetadata.fallbackReason, /opus: planner failed for opus/);
+    assert.match(plan.plannerMetadata.fallbackReason, /sonnet: planner failed for sonnet/);
+    assert.ok(plan.tasks.length >= 1);
+  } finally {
+    cleanup();
+  }
+}
+
 function testReviewerBackendSelection() {
   const { mod: reviewerRunner, cleanup } = loadTsModule("src/reviewer-runner.ts");
 
@@ -166,23 +227,30 @@ function testReviewerCommandUsesCodexReadOnlyPath() {
 const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
+  ["model planner falls back to sonnet before succeeding", testModelPlannerFallsBackToSonnet],
+  ["model planner falls back to heuristic after planner failures", testModelPlannerFallsBackToHeuristic],
   ["reviewer backend selection routes GPT reviewer to Codex", testReviewerBackendSelection],
   ["claude model resolution normalizes canonical refs", testClaudeModelResolutionNormalizesCanonicalRefs],
   ["reviewer command uses Codex read-only path", testReviewerCommandUsesCodexReadOnlyPath],
 ];
 
-let failures = 0;
-for (const [name, fn] of tests) {
-  try {
-    fn();
-    console.log(`PASS ${name}`);
-  } catch (error) {
-    failures++;
-    console.error(`FAIL ${name}`);
-    console.error(error);
+(async () => {
+  let failures = 0;
+  for (const [name, fn] of tests) {
+    try {
+      await fn();
+      console.log(`PASS ${name}`);
+    } catch (error) {
+      failures++;
+      console.error(`FAIL ${name}`);
+      console.error(error);
+    }
   }
-}
 
-if (failures > 0) {
+  if (failures > 0) {
+    process.exit(1);
+  }
+})().catch((error) => {
+  console.error(error);
   process.exit(1);
-}
+});

@@ -1,5 +1,5 @@
-import type { HarnessPlan, TaskSpec, Tier } from "./types";
-import { pluginConfig } from "./shared";
+import type { HarnessPlan, TaskSpec, Tier, PlannerMetadata } from "./types";
+import { pluginConfig, sessionManager } from "./shared";
 
 /**
  * Planner: decompose a request into concrete tasks with acceptance criteria.
@@ -109,10 +109,14 @@ export function buildPlan(
       mode: "solo",
       estimatedComplexity: "medium",
       tier: 1,
+      plannerMetadata: {
+        backend: "heuristic",
+        fallback: false,
+      },
     };
   }
 
-  // Tier 2: decompose into multiple tasks
+  // Tier 2: heuristic decomposition fallback
   const tasks = decomposeTasks(request);
   const mode = tasks.length === 1 ? "solo" : canParallelize(tasks) ? "parallel" : "sequential";
 
@@ -123,16 +127,21 @@ export function buildPlan(
     mode,
     estimatedComplexity: "high",
     tier: 2,
+    plannerMetadata: {
+      backend: "heuristic",
+      fallback: false,
+    },
   };
 }
 
 /**
  * Generate the LLM prompt for task decomposition (tier 2).
- * This prompt is sent to ACP Claude for planning.
+ * This prompt is sent to the internal Claude planner.
  */
 export function buildPlannerPrompt(request: string, memoryContext: string): string {
   const parts = [
     `You are a task planner. Decompose this request into concrete, independent implementation tasks.`,
+    `Return only YAML matching the schema below. Do not add commentary before or after the YAML.`,
     ``,
     `## Request`,
     request,
@@ -163,13 +172,256 @@ export function buildPlannerPrompt(request: string, memoryContext: string): stri
     `- Ignore report-only sections like Return:, Output:, Deliverables:, or response-format bullets when forming tasks.`,
     `- Scope must be specific (file paths, function names).`,
     `- Acceptance criteria must be concrete and testable.`,
-    `- Use "codex" as default agent.`,
+    `- Use "codex" as default agent unless a Claude worker is clearly better.`,
     `- Use "parallel" when tasks don't share files.`,
     `- Use "sequential" when later tasks depend on earlier ones.`,
     `- Maximum 6 tasks per plan.`,
   );
 
   return parts.join("\n");
+}
+
+// --- Model-backed planner (Tier 2) ---
+
+export interface PlannerRunInput {
+  prompt: string;
+  requestedModel: string;
+  workdir: string;
+}
+
+export interface PlannerRunResult {
+  output: string;
+  launchModel?: string;
+}
+
+export type PlannerModelRunner = (input: PlannerRunInput) => Promise<PlannerRunResult>;
+
+/**
+ * Attempt to parse a YAML-like plan from model output.
+ * This is a lightweight parser that handles the structured output format
+ * we request from the planner model. Returns null on parse failure.
+ */
+export function parsePlannerYaml(output: string): {
+  tasks: Array<{ id: string; title: string; scope: string; acceptance_criteria: string[]; agent: string }>;
+  mode: string;
+  estimated_complexity: string;
+} | null {
+  try {
+    let yaml = output.trim();
+    const fenced = output.match(/```(?:ya?ml)?\s*\n([\s\S]*?)```/);
+    if (fenced) yaml = fenced[1].trim();
+
+    const tasks: Array<{ id: string; title: string; scope: string; acceptance_criteria: string[]; agent: string }> = [];
+    const taskBlocks = yaml.split(/(?=^\s*-\s*id:\s*task-)/m);
+
+    for (const block of taskBlocks) {
+      const idMatch = block.match(/id:\s*(\S+)/);
+      const titleMatch = block.match(/title:\s*"?([^"\n]+)"?/);
+      const scopeMatch = block.match(/scope:\s*"?([^"\n]+)"?/);
+      const agentMatch = block.match(/agent:\s*(\S+)/);
+
+      if (!idMatch || !titleMatch) continue;
+
+      const criteria: string[] = [];
+      const criteriaSection = block.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)*)/);
+      if (criteriaSection) {
+        const bullets = criteriaSection[1].match(/^\s+-\s+"?([^"\n]+)"?/gm);
+        if (bullets) {
+          for (const bullet of bullets) {
+            const cleaned = bullet.replace(/^\s+-\s+"?/, "").replace(/"?\s*$/, "").trim();
+            if (cleaned) criteria.push(cleaned);
+          }
+        }
+      }
+
+      tasks.push({
+        id: idMatch[1],
+        title: titleMatch[1].trim(),
+        scope: scopeMatch ? scopeMatch[1].trim() : titleMatch[1].trim(),
+        acceptance_criteria: criteria.length > 0 ? criteria : [titleMatch[1].trim()],
+        agent: agentMatch ? agentMatch[1].trim() : "codex",
+      });
+    }
+
+    if (tasks.length === 0) return null;
+
+    const modeMatch = yaml.match(/^mode:\s*(\S+)/m);
+    const complexityMatch = yaml.match(/^estimated_complexity:\s*(\S+)/m);
+
+    return {
+      tasks,
+      mode: modeMatch ? modeMatch[1].trim() : "sequential",
+      estimated_complexity: complexityMatch ? complexityMatch[1].trim() : "high",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function yamlToHarnessPlan(
+  parsed: NonNullable<ReturnType<typeof parsePlannerYaml>>,
+  request: string,
+  metadata: PlannerMetadata,
+): HarnessPlan {
+  const tasks: TaskSpec[] = parsed.tasks.map((task, index) => ({
+    id: task.id || nextTaskId(index),
+    title: task.title.length > 60 ? task.title.slice(0, 57) + "..." : task.title,
+    scope: task.scope,
+    acceptanceCriteria: task.acceptance_criteria,
+    agent: task.agent === "claude" ? "claude" : "codex",
+  }));
+
+  const cappedTasks = tasks.slice(0, 6);
+  const modeNorm = parsed.mode.toLowerCase();
+  const complexityNorm = parsed.estimated_complexity.toLowerCase();
+
+  return {
+    id: nextPlanId(),
+    originalRequest: request,
+    tasks: cappedTasks,
+    mode: cappedTasks.length === 1
+      ? "solo"
+      : modeNorm === "parallel"
+        ? "parallel"
+        : modeNorm === "solo"
+          ? "solo"
+          : "sequential",
+    estimatedComplexity:
+      complexityNorm === "low"
+        ? "low"
+        : complexityNorm === "medium"
+          ? "medium"
+          : "high",
+    tier: 2,
+    plannerMetadata: metadata,
+  };
+}
+
+function uniquePlannerModels(models: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+
+  for (const model of models) {
+    const normalized = model.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    unique.push(normalized);
+  }
+
+  return unique;
+}
+
+function formatPlannerFailures(failures: string[]): string | undefined {
+  if (failures.length === 0) return undefined;
+  return failures.join("; ");
+}
+
+async function runPlannerWithSession(input: PlannerRunInput): Promise<PlannerRunResult> {
+  if (!sessionManager) {
+    throw new Error("SessionManager not available for model-backed planner");
+  }
+
+  const plannerSession = sessionManager.spawn({
+    prompt: input.prompt,
+    name: `planner-${input.requestedModel.replace(/[^a-z0-9]+/gi, "-")}-${Date.now()}`,
+    workdir: input.workdir,
+    model: input.requestedModel,
+    maxBudgetUsd: 0.5,
+    permissionMode: "default",
+    allowedTools: [],
+    multiTurn: false,
+    internal: true,
+  });
+
+  const output = await waitForPlannerOutput(plannerSession.id);
+  if (!output.trim()) {
+    throw new Error("Planner session produced no assistant output");
+  }
+
+  return {
+    output,
+    launchModel: plannerSession.model ?? input.requestedModel,
+  };
+}
+
+/**
+ * Run the model-backed planner for tier-2 requests.
+ *
+ * Fallback chain:
+ *   1. Primary: plannerModel or "opus" (Opus-compatible Claude path)
+ *   2. Fallback: "sonnet" (Sonnet-compatible Claude path)
+ *   3. Final fallback: current heuristic planner
+ */
+export async function buildModelPlan(
+  request: string,
+  memoryContext: string = "",
+  workdir: string = process.cwd(),
+  runner: PlannerModelRunner = runPlannerWithSession,
+): Promise<HarnessPlan> {
+  const prompt = buildPlannerPrompt(request, memoryContext);
+  const plannerModels = uniquePlannerModels([
+    pluginConfig.plannerModel || "opus",
+    "sonnet",
+  ]);
+  const failures: string[] = [];
+
+  for (const requestedModel of plannerModels) {
+    try {
+      console.log(`[planner] Attempting model-backed planning with model=${requestedModel}`);
+      const result = await runner({ prompt, requestedModel, workdir });
+      const parsed = parsePlannerYaml(result.output);
+      if (!parsed) {
+        throw new Error("Failed to parse planner YAML output");
+      }
+
+      const metadata: PlannerMetadata = {
+        backend: "model",
+        model: result.launchModel ?? requestedModel,
+        fallback: failures.length > 0,
+        fallbackReason: formatPlannerFailures(failures),
+      };
+
+      console.log(`[planner] Model-backed plan created: model=${metadata.model ?? requestedModel}, tasks=${parsed.tasks.length}, mode=${parsed.mode}`);
+      return yamlToHarnessPlan(parsed, request, metadata);
+    } catch (error: any) {
+      const message = error?.message ?? String(error);
+      failures.push(`${requestedModel}: ${message}`);
+      console.warn(`[planner] Model planner failed (model=${requestedModel}): ${message}`);
+    }
+  }
+
+  console.log(`[planner] All model attempts failed, falling back to heuristic planner`);
+  const heuristicPlan = buildPlan(request, 2, memoryContext);
+  heuristicPlan.plannerMetadata = {
+    backend: "heuristic",
+    fallback: true,
+    fallbackReason: formatPlannerFailures(failures) ?? "Model planner unavailable",
+  };
+  return heuristicPlan;
+}
+
+/**
+ * Wait for a planner session to complete and return its output text.
+ * Timeout: 2 minutes (planners should be fast).
+ */
+async function waitForPlannerOutput(sessionId: string): Promise<string> {
+  const maxWaitMs = 2 * 60 * 1000;
+  const pollIntervalMs = 1000;
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const session = sessionManager?.get(sessionId);
+    if (!session) return "";
+
+    if (session.status === "completed" || session.status === "failed" || session.status === "killed") {
+      return session.getOutput().join("\n");
+    }
+
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  sessionManager?.kill(sessionId);
+  return "";
 }
 
 // --- Helper functions ---

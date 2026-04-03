@@ -28,6 +28,7 @@ export interface SessionConfig {
   name?: string;
   model?: string;
   maxBudgetUsd: number;
+  internal?: boolean;
   foreground?: boolean;
   systemPrompt?: string;
   allowedTools?: string[];
@@ -102,6 +103,7 @@ export interface PluginConfig {
   maxReviewLoops: number;
   reviewModel?: string;
   workerModel?: string;
+  plannerModel?: string;
   memoryV3Endpoint?: string;
   routerMaxTokens: number;
   plannerMaxTokens: number;
@@ -131,6 +133,17 @@ export interface TaskSpec {
   agent: "codex" | "claude";
 }
 
+export interface PlannerMetadata {
+  /** Which planner backend produced this plan: "model" or "heuristic" */
+  backend: "model" | "heuristic";
+  /** Model used for planning (undefined for heuristic) */
+  model?: string;
+  /** Whether the planner fell back from a higher-tier attempt */
+  fallback: boolean;
+  /** If fallback happened, the reason */
+  fallbackReason?: string;
+}
+
 export interface HarnessPlan {
   id: string;
   originalRequest: string;
@@ -138,6 +151,7 @@ export interface HarnessPlan {
   mode: "solo" | "parallel" | "sequential";
   estimatedComplexity: "low" | "medium" | "high";
   tier: Tier;
+  plannerMetadata?: PlannerMetadata;
 }
 
 export interface WorkerResult {

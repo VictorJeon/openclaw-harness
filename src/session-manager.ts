@@ -151,8 +151,12 @@ export class SessionManager {
     this.sessions.set(session.id, session);
     this._metrics.totalLaunched++;
 
-    // Wire up notification callbacks if NotificationRouter is available
-    if (this.notificationRouter) {
+    if (config.internal) {
+      session.onComplete = () => {
+        console.log(`[SessionManager] Internal session completed: session=${session.id} (${session.name})`);
+        this.persistSession(session);
+      };
+    } else if (this.notificationRouter) {
       const nr = this.notificationRouter;
       console.log(`[SessionManager] Wiring notification callbacks for session=${session.id} (${session.name}), originChannel=${session.originChannel}`);
 
@@ -204,15 +208,17 @@ export class SessionManager {
 
     session.start();
 
-    // Level 1: Send ↩️ Launched notification to Telegram (informational, no IPC wake)
-    const promptSummary = session.prompt.length > 80
-      ? session.prompt.slice(0, 80) + "..."
-      : session.prompt;
-    this.deliverToTelegram(
-      session,
-      `↩️ [${session.name}] Launched:\n${promptSummary}`,
-      "launched",
-    );
+    if (!config.internal) {
+      // Level 1: Send ↩️ Launched notification to Telegram (informational, no IPC wake)
+      const promptSummary = session.prompt.length > 80
+        ? session.prompt.slice(0, 80) + "..."
+        : session.prompt;
+      this.deliverToTelegram(
+        session,
+        `↩️ [${session.name}] Launched:\n${promptSummary}`,
+        "launched",
+      );
+    }
 
     return session;
   }
@@ -633,6 +639,9 @@ export class SessionManager {
     }
     // Persist and notify — killed sessions don't trigger onComplete
     this.persistSession(session);
+    if (session.internal) {
+      return true;
+    }
     if (this.notificationRouter) {
       this.notificationRouter.onSessionComplete(session);
     }

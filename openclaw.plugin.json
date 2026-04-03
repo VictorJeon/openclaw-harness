@@ -85,6 +85,10 @@
         "type": "string",
         "description": "Model for worker execution (defaults to claude). Used for tier 1 coding tasks."
       },
+      "plannerModel": {
+        "type": "string",
+        "description": "Primary model for internal tier-2 planning (defaults to opus, then falls back to sonnet)."
+      },
       "memoryV3Endpoint": {
         "type": "string",
         "description": "Memory V3 search endpoint (e.g. http://127.0.0.1:18790/v1/memory/search)"
