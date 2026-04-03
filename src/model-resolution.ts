@@ -128,9 +128,22 @@ function loadAliasIndex(): Map<string, string> {
   return aliases;
 }
 
+function normalizeClaudeLaunchModel(model: string): string {
+  const normalized = model.trim().toLowerCase();
+
+  if (normalized === "anthropic/claude-opus-4-6") return "opus";
+  if (normalized === "anthropic/claude-sonnet-4-6") return "sonnet";
+  if (normalized === "anthropic/claude-opus-4-5") return "opus";
+  if (normalized === "anthropic/claude-sonnet-4-5") return "sonnet";
+  if (normalized === "anthropic/claude-opus-4-1") return "opus";
+  if (normalized === "anthropic/claude-sonnet-4-1") return "sonnet";
+
+  return model;
+}
+
 /**
- * Resolve OpenClaw model aliases (agents.defaults.models.*.alias) to canonical
- * provider/model refs before passing them to the Claude SDK.
+ * Resolve OpenClaw model aliases (agents.defaults.models.*.alias) and normalize
+ * Claude launch models into values accepted by the Claude SDK/CLI.
  */
 export function resolveModelAlias(model?: string): string | undefined {
   if (typeof model !== "string") return undefined;
@@ -138,9 +151,10 @@ export function resolveModelAlias(model?: string): string | undefined {
   const trimmed = model.trim();
   if (!trimmed) return undefined;
 
-  // Already canonical provider/model form.
-  if (trimmed.includes("/")) return trimmed;
-
   const aliases = loadAliasIndex();
-  return aliases.get(trimmed.toLowerCase()) ?? trimmed;
+  const canonical = trimmed.includes("/")
+    ? trimmed
+    : (aliases.get(trimmed.toLowerCase()) ?? trimmed);
+
+  return normalizeClaudeLaunchModel(canonical);
 }

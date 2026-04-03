@@ -103,9 +103,39 @@ function testReviewerBackendSelection() {
 
     const claudeTarget = reviewerRunner.resolveReviewerExecutionTarget("anthropic/claude-sonnet-4-5", "openai-codex/gpt-5.4");
     assert.equal(claudeTarget.backend, "claude-session");
-    assert.equal(claudeTarget.launchModel, "anthropic/claude-sonnet-4-5");
+    assert.equal(claudeTarget.launchModel, "sonnet");
   } finally {
     cleanup();
+  }
+}
+
+function testClaudeModelResolutionNormalizesCanonicalRefs() {
+  const tempDir = mkdtempSync(join(tmpdir(), "openclaw-harness-model-test-"));
+  const configPath = join(tempDir, "openclaw.json");
+  const priorConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+  require("node:fs").writeFileSync(configPath, JSON.stringify({
+    agents: {
+      defaults: {
+        models: {
+          "anthropic/claude-opus-4-6": { alias: "opus46" },
+          "anthropic/claude-sonnet-4-6": { alias: "sonnet46" }
+        }
+      }
+    }
+  }), "utf8");
+  process.env.OPENCLAW_CONFIG_PATH = configPath;
+  const { mod: modelResolution, cleanup } = loadTsModule("src/model-resolution.ts");
+
+  try {
+    assert.equal(modelResolution.resolveModelAlias("anthropic/claude-opus-4-6"), "opus");
+    assert.equal(modelResolution.resolveModelAlias("anthropic/claude-sonnet-4-6"), "sonnet");
+    assert.equal(modelResolution.resolveModelAlias("opus46"), "opus");
+    assert.equal(modelResolution.resolveModelAlias("sonnet46"), "sonnet");
+  } finally {
+    cleanup();
+    if (priorConfigPath === undefined) delete process.env.OPENCLAW_CONFIG_PATH;
+    else process.env.OPENCLAW_CONFIG_PATH = priorConfigPath;
+    rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -137,6 +167,7 @@ const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
   ["reviewer backend selection routes GPT reviewer to Codex", testReviewerBackendSelection],
+  ["claude model resolution normalizes canonical refs", testClaudeModelResolutionNormalizesCanonicalRefs],
   ["reviewer command uses Codex read-only path", testReviewerCommandUsesCodexReadOnlyPath],
 ];
 
