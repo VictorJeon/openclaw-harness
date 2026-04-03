@@ -52,6 +52,7 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     permissionMode: config.permissionMode,
     agentChannels,
     maxAutoResponds: config.maxAutoResponds ?? 10,
+    enableLegacyTools: (config as any).enableLegacyTools ?? false,
     skipSafetyChecks: config.skipSafetyChecks,
     operationMode: (config as any).operationMode ?? "delegate",
     maxReviewLoops: (config as any).maxReviewLoops ?? 4,
