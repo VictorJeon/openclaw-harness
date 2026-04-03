@@ -2,6 +2,8 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SessionConfig, SessionStatus, PermissionMode } from "./types";
 import { pluginConfig } from "./shared";
 import { nanoid } from "nanoid";
+import { resolveModelAlias } from "./model-resolution";
+import { tryRecoverRealtimeSyncConflict } from "./git-sync-recovery";
 
 const OUTPUT_BUFFER_MAX = 200;
 
@@ -139,7 +141,7 @@ export class Session {
     this.name = name;
     this.prompt = config.prompt;
     this.workdir = config.workdir;
-    this.model = config.model;
+    this.model = resolveModelAlias(config.model);
     this.maxBudgetUsd = config.maxBudgetUsd;
     this.systemPrompt = config.systemPrompt;
     this.allowedTools = config.allowedTools;
@@ -155,6 +157,18 @@ export class Session {
   }
 
   async start(): Promise<void> {
+    void this.runSession(0).catch((err: any) => {
+      if (this.status === "starting" || this.status === "running") {
+        this.status = "failed";
+        this.error = err?.message ?? String(err);
+        this.completedAt = Date.now();
+        this.clearSafetyNetTimer();
+        if (this.idleTimer) clearTimeout(this.idleTimer);
+      }
+    });
+  }
+
+  private async runSession(retryCount: number): Promise<void> {
     let q;
     try {
       // Build SDK options
@@ -199,21 +213,50 @@ export class Session {
 
       // Store the query handle for multi-turn control (interrupt, streamInput)
       this.queryHandle = q;
-    } catch (err: any) {
-      this.status = "failed";
-      this.error = err?.message ?? String(err);
-      this.completedAt = Date.now();
-      return;
-    }
 
-    // Run the async iteration in background (non-blocking)
-    this.consumeMessages(q).catch((err) => {
+      // Run the async iteration in background (non-blocking)
+      await this.consumeMessages(q);
+    } catch (err: any) {
+      const errorMessage = err?.message ?? String(err);
+      let recovery = null;
+
+      if (!this.multiTurn && retryCount === 0) {
+        try {
+          recovery = tryRecoverRealtimeSyncConflict(this.workdir, errorMessage);
+        } catch (recoveryError: any) {
+          console.warn(
+            `[Session] ${this.id} realtime sync recovery failed: ${recoveryError?.message ?? String(recoveryError)}`,
+          );
+        }
+      }
+
+      if (recovery) {
+        console.warn(
+          `[Session] ${this.id} recovered realtime sync conflict by moving ${recovery.moved.length} untracked path(s) to ${recovery.backupRoot}; retrying once`,
+        );
+        this.error = undefined;
+        this.status = "starting";
+        this.completedAt = undefined;
+        this.claudeSessionId = undefined;
+        this.result = undefined;
+        this.queryHandle = undefined;
+        this.clearSafetyNetTimer();
+        if (this.idleTimer) {
+          clearTimeout(this.idleTimer);
+          this.idleTimer = undefined;
+        }
+        await this.runSession(retryCount + 1);
+        return;
+      }
+
       if (this.status === "starting" || this.status === "running") {
         this.status = "failed";
-        this.error = err?.message ?? String(err);
+        this.error = errorMessage;
         this.completedAt = Date.now();
+        this.clearSafetyNetTimer();
+        if (this.idleTimer) clearTimeout(this.idleTimer);
       }
-    });
+    }
   }
 
   /**
