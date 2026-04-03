@@ -208,7 +208,7 @@ export interface PlannerRunResult {
 export type PlannerModelRunner = (input: PlannerRunInput) => Promise<PlannerRunResult>;
 
 /**
- * Parsed planner output shape. Used by both the JSON parser and YAML fallback.
+ * Parsed planner output shape for strict JSON planner responses.
  */
 export interface ParsedPlannerOutput {
   tasks: Array<{ id: string; title: string; scope: string; acceptance_criteria: string[]; agent: string }>;
@@ -331,64 +331,6 @@ function parsePlannerJsonFromString(jsonStr: string): ParsedPlannerOutput | null
   };
 }
 
-/**
- * @deprecated Use parsePlannerJson instead. Kept as fallback for legacy YAML outputs.
- * Attempt to parse a YAML-like plan from model output.
- * Returns null on parse failure.
- */
-export function parsePlannerYaml(output: string): ParsedPlannerOutput | null {
-  try {
-    let yaml = output.trim();
-    const fenced = output.match(/```(?:ya?ml)?\s*\n([\s\S]*?)```/);
-    if (fenced) yaml = fenced[1].trim();
-
-    const tasks: ParsedPlannerOutput["tasks"] = [];
-    const taskBlocks = yaml.split(/(?=^\s*-\s*id:\s*task-)/m);
-
-    for (const block of taskBlocks) {
-      const idMatch = block.match(/id:\s*(\S+)/);
-      const titleMatch = block.match(/title:\s*"?([^"\n]+)"?/);
-      const scopeMatch = block.match(/scope:\s*"?([^"\n]+)"?/);
-      const agentMatch = block.match(/agent:\s*(\S+)/);
-
-      if (!idMatch || !titleMatch) continue;
-
-      const criteria: string[] = [];
-      const criteriaSection = block.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)*)/);
-      if (criteriaSection) {
-        const bullets = criteriaSection[1].match(/^\s+-\s+"?([^"\n]+)"?/gm);
-        if (bullets) {
-          for (const bullet of bullets) {
-            const cleaned = bullet.replace(/^\s+-\s+"?/, "").replace(/"?\s*$/, "").trim();
-            if (cleaned) criteria.push(cleaned);
-          }
-        }
-      }
-
-      tasks.push({
-        id: idMatch[1],
-        title: titleMatch[1].trim(),
-        scope: scopeMatch ? scopeMatch[1].trim() : titleMatch[1].trim(),
-        acceptance_criteria: criteria.length > 0 ? criteria : [titleMatch[1].trim()],
-        agent: agentMatch ? agentMatch[1].trim() : "codex",
-      });
-    }
-
-    if (tasks.length === 0) return null;
-
-    const modeMatch = yaml.match(/^mode:\s*(\S+)/m);
-    const complexityMatch = yaml.match(/^estimated_complexity:\s*(\S+)/m);
-
-    return {
-      tasks,
-      mode: modeMatch ? modeMatch[1].trim() : "sequential",
-      estimated_complexity: complexityMatch ? complexityMatch[1].trim() : "high",
-    };
-  } catch {
-    return null;
-  }
-}
-
 function yamlToHarnessPlan(
   parsed: ParsedPlannerOutput,
   request: string,
@@ -500,18 +442,9 @@ export async function buildModelPlan(
     try {
       console.log(`[planner] Attempting model-backed planning with model=${requestedModel}`);
       const result = await runner({ prompt, requestedModel, workdir });
-      // Primary: strict JSON extraction. Fallback: legacy YAML regex parser.
-      let parsed = parsePlannerJson(result.output);
-      let parseFormat: "json" | "yaml-fallback" = "json";
+      const parsed = parsePlannerJson(result.output);
       if (!parsed) {
-        parsed = parsePlannerYaml(result.output);
-        parseFormat = "yaml-fallback";
-      }
-      if (!parsed) {
-        throw new Error("Failed to parse planner output (tried JSON then YAML fallback)");
-      }
-      if (parseFormat === "yaml-fallback") {
-        console.warn(`[planner] Model=${requestedModel} output parsed via YAML fallback — model did not produce fenced JSON`);
+        throw new Error("Failed to parse planner output: model did not return valid fenced JSON");
       }
 
       const metadata: PlannerMetadata = {

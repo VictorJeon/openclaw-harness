@@ -108,15 +108,7 @@ async function testModelPlannerFallsBackToSonnet() {
 
         return {
           launchModel: requestedModel,
-          output: `tasks:
-  - id: task-1
-    title: "Implement internal planner fallback coverage"
-    scope: "src/planner.ts"
-    acceptance_criteria:
-      - "planner metadata records fallback"
-    agent: codex
-mode: solo
-estimated_complexity: medium`,
+          output: '```json\n{"tasks":[{"id":"task-1","title":"Implement internal planner fallback coverage","scope":"src/planner.ts","acceptance_criteria":["planner metadata records fallback"],"agent":"codex"}],"mode":"solo","estimated_complexity":"medium"}\n```',
         };
       },
     );
