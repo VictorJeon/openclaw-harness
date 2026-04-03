@@ -137,11 +137,16 @@ export function buildPlan(
 /**
  * Generate the LLM prompt for task decomposition (tier 2).
  * This prompt is sent to the internal Claude planner.
+ *
+ * Contract: The planner MUST return a single fenced JSON block.
+ * Any prose outside the fenced block is ignored by the parser.
  */
 export function buildPlannerPrompt(request: string, memoryContext: string): string {
   const parts = [
     `You are a task planner. Decompose this request into concrete, independent implementation tasks.`,
-    `Return only YAML matching the schema below. Do not add commentary before or after the YAML.`,
+    ``,
+    `IMPORTANT: Return your plan as a single fenced JSON code block. Do not use YAML.`,
+    `Any text outside the JSON code block will be ignored.`,
     ``,
     `## Request`,
     request,
@@ -153,18 +158,24 @@ export function buildPlannerPrompt(request: string, memoryContext: string): stri
 
   parts.push(
     ``,
-    `## Output Format (YAML)`,
-    `tasks:`,
-    `  - id: task-1`,
-    `    title: "<short title>"`,
-    `    scope: "<specific files/functions to modify>"`,
-    `    acceptance_criteria:`,
-    `      - "<concrete, testable criterion>"`,
-    `    agent: codex`,
-    `  - id: task-2`,
-    `    ...`,
-    `mode: parallel | sequential | solo`,
-    `estimated_complexity: low | medium | high`,
+    `## Output Format`,
+    `Respond with exactly one fenced JSON block:`,
+    ``,
+    "```json",
+    `{`,
+    `  "tasks": [`,
+    `    {`,
+    `      "id": "task-1",`,
+    `      "title": "Short descriptive title",`,
+    `      "scope": "specific files/functions to modify",`,
+    `      "acceptance_criteria": ["concrete, testable criterion"],`,
+    `      "agent": "codex"`,
+    `    }`,
+    `  ],`,
+    `  "mode": "parallel | sequential | solo",`,
+    `  "estimated_complexity": "low | medium | high"`,
+    `}`,
+    "```",
     ``,
     `## Rules`,
     `- Prefer fewer, coherent tasks over many literal fragments.`,
@@ -197,21 +208,141 @@ export interface PlannerRunResult {
 export type PlannerModelRunner = (input: PlannerRunInput) => Promise<PlannerRunResult>;
 
 /**
- * Attempt to parse a YAML-like plan from model output.
- * This is a lightweight parser that handles the structured output format
- * we request from the planner model. Returns null on parse failure.
+ * Parsed planner output shape. Used by both the JSON parser and YAML fallback.
  */
-export function parsePlannerYaml(output: string): {
+export interface ParsedPlannerOutput {
   tasks: Array<{ id: string; title: string; scope: string; acceptance_criteria: string[]; agent: string }>;
   mode: string;
   estimated_complexity: string;
-} | null {
+}
+
+/**
+ * Extract a fenced JSON block from model output.
+ * Accepts ```json ... ``` blocks. Ignores any prose outside the fence.
+ * Returns null if no valid fenced JSON block is found.
+ */
+export function extractFencedJson(output: string): string | null {
+  // Match ```json ... ``` (greedy inner match, last fence wins if multiple)
+  const matches = [...output.matchAll(/```json\s*\n([\s\S]*?)```/g)];
+  if (matches.length > 0) {
+    // Use the last match (in case the model includes examples before the real output)
+    return matches[matches.length - 1][1].trim();
+  }
+
+  // Fallback: try a generic ``` ... ``` block if the content looks like JSON
+  const genericMatches = [...output.matchAll(/```\s*\n([\s\S]*?)```/g)];
+  for (let i = genericMatches.length - 1; i >= 0; i--) {
+    const content = genericMatches[i][1].trim();
+    if (content.startsWith("{") || content.startsWith("[")) {
+      return content;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validate and normalize a single task from parsed JSON.
+ * Returns null if the task is malformed.
+ */
+function validatePlannerTask(raw: any, index: number): ParsedPlannerOutput["tasks"][0] | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `task-${index + 1}`;
+  const title = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : null;
+  if (!title) return null; // title is required
+
+  const scope = typeof raw.scope === "string" && raw.scope.trim() ? raw.scope.trim() : title;
+  const agent = typeof raw.agent === "string" && raw.agent.trim() ? raw.agent.trim() : "codex";
+
+  let acceptanceCriteria: string[] = [];
+  if (Array.isArray(raw.acceptance_criteria)) {
+    acceptanceCriteria = raw.acceptance_criteria
+      .filter((c: any) => typeof c === "string" && c.trim())
+      .map((c: string) => c.trim());
+  }
+  if (acceptanceCriteria.length === 0) {
+    acceptanceCriteria = [title];
+  }
+
+  return { id, title, scope, acceptance_criteria: acceptanceCriteria, agent };
+}
+
+const VALID_MODES = new Set(["parallel", "sequential", "solo"]);
+const VALID_COMPLEXITIES = new Set(["low", "medium", "high"]);
+
+/**
+ * Parse planner output using strict JSON extraction + schema validation.
+ *
+ * Strategy:
+ *   1. Extract fenced JSON from the model output (ignores surrounding prose).
+ *   2. JSON.parse the extracted block.
+ *   3. Validate the schema: tasks array with required fields, mode, complexity.
+ *   4. Returns null on any parse/validation failure.
+ *
+ * This replaces the previous YAML-lite regex parser (parsePlannerYaml).
+ */
+export function parsePlannerJson(output: string): ParsedPlannerOutput | null {
+  try {
+    const jsonStr = extractFencedJson(output);
+    if (!jsonStr) {
+      // Last-resort: try to parse the entire output as JSON (no fence)
+      const trimmed = output.trim();
+      if (trimmed.startsWith("{")) {
+        return parsePlannerJsonFromString(trimmed);
+      }
+      return null;
+    }
+
+    return parsePlannerJsonFromString(jsonStr);
+  } catch {
+    return null;
+  }
+}
+
+function parsePlannerJsonFromString(jsonStr: string): ParsedPlannerOutput | null {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object") return null;
+  if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) return null;
+
+  const tasks: ParsedPlannerOutput["tasks"] = [];
+  for (let i = 0; i < parsed.tasks.length; i++) {
+    const validated = validatePlannerTask(parsed.tasks[i], i);
+    if (validated) tasks.push(validated);
+  }
+
+  if (tasks.length === 0) return null;
+
+  const modeRaw = typeof parsed.mode === "string" ? parsed.mode.trim().toLowerCase() : "";
+  const complexityRaw = typeof parsed.estimated_complexity === "string"
+    ? parsed.estimated_complexity.trim().toLowerCase()
+    : "";
+
+  return {
+    tasks,
+    mode: VALID_MODES.has(modeRaw) ? modeRaw : "sequential",
+    estimated_complexity: VALID_COMPLEXITIES.has(complexityRaw) ? complexityRaw : "high",
+  };
+}
+
+/**
+ * @deprecated Use parsePlannerJson instead. Kept as fallback for legacy YAML outputs.
+ * Attempt to parse a YAML-like plan from model output.
+ * Returns null on parse failure.
+ */
+export function parsePlannerYaml(output: string): ParsedPlannerOutput | null {
   try {
     let yaml = output.trim();
     const fenced = output.match(/```(?:ya?ml)?\s*\n([\s\S]*?)```/);
     if (fenced) yaml = fenced[1].trim();
 
-    const tasks: Array<{ id: string; title: string; scope: string; acceptance_criteria: string[]; agent: string }> = [];
+    const tasks: ParsedPlannerOutput["tasks"] = [];
     const taskBlocks = yaml.split(/(?=^\s*-\s*id:\s*task-)/m);
 
     for (const block of taskBlocks) {
@@ -259,7 +390,7 @@ export function parsePlannerYaml(output: string): {
 }
 
 function yamlToHarnessPlan(
-  parsed: NonNullable<ReturnType<typeof parsePlannerYaml>>,
+  parsed: ParsedPlannerOutput,
   request: string,
   metadata: PlannerMetadata,
 ): HarnessPlan {
@@ -369,9 +500,18 @@ export async function buildModelPlan(
     try {
       console.log(`[planner] Attempting model-backed planning with model=${requestedModel}`);
       const result = await runner({ prompt, requestedModel, workdir });
-      const parsed = parsePlannerYaml(result.output);
+      // Primary: strict JSON extraction. Fallback: legacy YAML regex parser.
+      let parsed = parsePlannerJson(result.output);
+      let parseFormat: "json" | "yaml-fallback" = "json";
       if (!parsed) {
-        throw new Error("Failed to parse planner YAML output");
+        parsed = parsePlannerYaml(result.output);
+        parseFormat = "yaml-fallback";
+      }
+      if (!parsed) {
+        throw new Error("Failed to parse planner output (tried JSON then YAML fallback)");
+      }
+      if (parseFormat === "yaml-fallback") {
+        console.warn(`[planner] Model=${requestedModel} output parsed via YAML fallback — model did not produce fenced JSON`);
       }
 
       const metadata: PlannerMetadata = {

@@ -523,10 +523,28 @@ interface SessionCompletion {
   status: "completed" | "failed" | "killed" | "timeout";
   output: string;
   error?: string;
+  /** True if the session reached terminal state with a usable result payload */
+  hasUsableOutput: boolean;
+  /** Cost in USD at terminal state */
+  costUsd: number;
+  /** Number of turns completed */
+  numTurns: number;
 }
 
 /**
- * Wait for a session to reach terminal state and return status + output.
+ * Determine if a session status is terminal (no further state transitions possible).
+ */
+function isTerminalStatus(status: string): status is "completed" | "failed" | "killed" {
+  return status === "completed" || status === "failed" || status === "killed";
+}
+
+/**
+ * Wait for a session to reach terminal state and return an authoritative
+ * SessionCompletion record.
+ *
+ * Uses the session's `terminalResult` (frozen snapshot) when available to
+ * avoid stale-state races. Falls back to live session fields for backward
+ * compatibility if `terminalResult` is not yet populated.
  */
 async function waitForSessionEnd(sessionId: string): Promise<SessionCompletion> {
   const maxWaitMs = 10 * 60 * 1000; // 10 minutes max
@@ -536,39 +554,119 @@ async function waitForSessionEnd(sessionId: string): Promise<SessionCompletion> 
   while (Date.now() - startTime < maxWaitMs) {
     const session = sessionManager!.get(sessionId);
     if (!session) {
-      return { status: "failed", output: "", error: "Session disappeared" };
+      console.warn(`[harness] Session ${sessionId} disappeared from SessionManager during wait`);
+      return { status: "failed", output: "", error: "Session disappeared from manager (GC'd or removed)", hasUsableOutput: false, costUsd: 0, numTurns: 0 };
     }
 
-    if (session.status === "completed" || session.status === "failed" || session.status === "killed") {
+    if (isTerminalStatus(session.status)) {
+      const output = session.getOutput().join("\n");
+
+      // Prefer the frozen terminal result for authoritative state
+      if (session.terminalResult) {
+        const tr = session.terminalResult;
+        // Validate status consistency between session.status and terminalResult
+        if (tr.status !== session.status) {
+          console.warn(
+            `[harness] Session ${sessionId} status mismatch: session.status=${session.status}, terminalResult.status=${tr.status}. Using terminalResult as authoritative.`,
+          );
+        }
+
+        return {
+          status: tr.status as "completed" | "failed" | "killed",
+          output,
+          error: session.error,
+          hasUsableOutput: tr.hasUsableOutput,
+          costUsd: tr.costUsd,
+          numTurns: tr.num_turns,
+        };
+      }
+
+      // Fallback: terminalResult not populated (shouldn't happen, but degrade safely)
+      console.warn(
+        `[harness] Session ${sessionId} is terminal (status=${session.status}) but terminalResult is missing. Using live fields as fallback.`,
+      );
+      const hasUsableOutput = output.length > 0 || !!(session.result?.result);
       return {
         status: session.status,
-        output: session.getOutput().join("\n"),
+        output,
         error: session.error,
+        hasUsableOutput,
+        costUsd: session.costUsd,
+        numTurns: session.result?.num_turns ?? 0,
       };
     }
 
     await sleep(pollIntervalMs);
   }
 
-  console.warn(`[harness] Timeout waiting for session ${sessionId}`);
+  // Timeout path
+  const session = sessionManager!.get(sessionId);
+  const lastStatus = session?.status ?? "unknown";
+  const lastOutput = session?.getOutput().join("\n") ?? "";
+  console.warn(
+    `[harness] Timeout waiting for session ${sessionId} after ${maxWaitMs / 1000}s. ` +
+    `Last status=${lastStatus}, outputLines=${session?.outputBuffer.length ?? 0}, ` +
+    `cost=$${(session?.costUsd ?? 0).toFixed(4)}`,
+  );
   // Kill the timed-out session
   sessionManager!.kill(sessionId);
-  return { status: "timeout", output: "", error: "Session timed out after 10 minutes" };
+  return {
+    status: "timeout",
+    output: lastOutput,
+    error: `Session timed out after ${maxWaitMs / 60000} minutes (last status: ${lastStatus})`,
+    hasUsableOutput: lastOutput.length > 0,
+    costUsd: session?.costUsd ?? 0,
+    numTurns: session?.result?.num_turns ?? 0,
+  };
 }
 
 /**
  * Wait for a session to complete successfully and extract a WorkerResult.
+ *
  * Returns null if the session failed, was killed, or timed out.
+ * When the session completed but produced no output, returns a
+ * WorkerResult with status="completed" and an empty summary rather
+ * than silently returning null — this preserves the "completed" signal
+ * and avoids treating empty output as total failure.
  */
 async function waitForCompletion(sessionId: string, taskId: string): Promise<WorkerResult | null> {
   const completion = await waitForSessionEnd(sessionId);
 
   if (completion.status !== "completed") {
-    console.warn(`[harness] Worker session ${sessionId} ended with status=${completion.status}: ${completion.error}`);
+    console.warn(
+      `[harness] Worker session ${sessionId} ended with status=${completion.status}: ${completion.error ?? "no error"}. ` +
+      `cost=$${completion.costUsd.toFixed(4)}, turns=${completion.numTurns}, hasUsableOutput=${completion.hasUsableOutput}`,
+    );
+    // On timeout, if there IS partial output, try to salvage a degraded result
+    if (completion.status === "timeout" && completion.hasUsableOutput && completion.output) {
+      console.warn(`[harness] Salvaging partial output from timed-out session ${sessionId}`);
+      return {
+        taskId,
+        status: "failed",
+        summary: completion.output.length > 500 ? completion.output.slice(-500) : completion.output,
+        filesChanged: extractFilePaths(completion.output),
+        testsRun: extractTestCount(completion.output),
+        warnings: [...extractWarnings(completion.output), "Session timed out — result may be incomplete"],
+        sessionId,
+      };
+    }
     return null;
   }
 
-  if (!completion.output) return null;
+  // Completed but no output — return a minimal result instead of null
+  // to avoid losing the "completed" state signal
+  if (!completion.output) {
+    console.warn(`[harness] Worker session ${sessionId} completed but produced no output (turns=${completion.numTurns}, cost=$${completion.costUsd.toFixed(4)})`);
+    return {
+      taskId,
+      status: "completed",
+      summary: "(Session completed with no output)",
+      filesChanged: [],
+      testsRun: 0,
+      warnings: ["Session completed but produced no assistant output"],
+      sessionId,
+    };
+  }
 
   return {
     taskId,
@@ -583,12 +681,20 @@ async function waitForCompletion(sessionId: string, taskId: string): Promise<Wor
 
 /**
  * Wait for a session to complete and return its output (for reviewer).
- * Returns empty string on failure.
+ * Returns empty string on failure, with diagnostic logging.
  */
 async function waitForOutput(sessionId: string): Promise<string> {
   const completion = await waitForSessionEnd(sessionId);
   if (completion.status !== "completed") {
-    console.warn(`[harness] Session ${sessionId} ended with status=${completion.status}: ${completion.error}`);
+    console.warn(
+      `[harness] Reviewer session ${sessionId} ended with status=${completion.status}: ${completion.error ?? "no error"}. ` +
+      `cost=$${completion.costUsd.toFixed(4)}, turns=${completion.numTurns}`,
+    );
+    // On timeout with partial output, return what we have so reviewer parsing can try
+    if (completion.hasUsableOutput && completion.output) {
+      console.warn(`[harness] Returning partial output from non-completed reviewer session ${sessionId}`);
+      return completion.output;
+    }
     return "";
   }
   return completion.output;

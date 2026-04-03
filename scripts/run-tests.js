@@ -224,6 +224,167 @@ function testReviewerCommandUsesCodexReadOnlyPath() {
   }
 }
 
+// --- Planner JSON parser tests ---
+
+function testPlannerJsonParsesFencedJson() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    const output = `Here is the plan:
+
+\`\`\`json
+{
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Fix authentication",
+      "scope": "src/auth.ts",
+      "acceptance_criteria": ["Auth works correctly", "Tests pass"],
+      "agent": "codex"
+    },
+    {
+      "id": "task-2",
+      "title": "Update API routes",
+      "scope": "src/routes.ts",
+      "acceptance_criteria": ["Routes updated"],
+      "agent": "claude"
+    }
+  ],
+  "mode": "parallel",
+  "estimated_complexity": "medium"
+}
+\`\`\`
+
+That should cover all the changes needed.`;
+
+    const parsed = planner.parsePlannerJson(output);
+    assert.ok(parsed, "parsePlannerJson should return a result");
+    assert.equal(parsed.tasks.length, 2);
+    assert.equal(parsed.tasks[0].id, "task-1");
+    assert.equal(parsed.tasks[0].title, "Fix authentication");
+    assert.equal(parsed.tasks[0].scope, "src/auth.ts");
+    assert.deepEqual(parsed.tasks[0].acceptance_criteria, ["Auth works correctly", "Tests pass"]);
+    assert.equal(parsed.tasks[0].agent, "codex");
+    assert.equal(parsed.tasks[1].agent, "claude");
+    assert.equal(parsed.mode, "parallel");
+    assert.equal(parsed.estimated_complexity, "medium");
+  } finally {
+    cleanup();
+  }
+}
+
+function testPlannerJsonRejectsInvalidJson() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    // No JSON block at all
+    assert.equal(planner.parsePlannerJson("Here is some prose with no JSON"), null);
+
+    // Empty tasks array
+    assert.equal(planner.parsePlannerJson('```json\n{"tasks": [], "mode": "solo"}\n```'), null);
+
+    // Missing title (required field)
+    assert.equal(planner.parsePlannerJson('```json\n{"tasks": [{"id": "task-1", "scope": "x"}], "mode": "solo"}\n```'), null);
+
+    // Not an object
+    assert.equal(planner.parsePlannerJson('```json\n"just a string"\n```'), null);
+  } finally {
+    cleanup();
+  }
+}
+
+function testPlannerJsonDefaultsAndNormalization() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    // Missing optional fields: scope defaults to title, agent to codex, criteria to [title]
+    const output = '```json\n{"tasks": [{"id": "task-1", "title": "Do something"}], "mode": "invalid_mode", "estimated_complexity": "invalid"}\n```';
+    const parsed = planner.parsePlannerJson(output);
+    assert.ok(parsed);
+    assert.equal(parsed.tasks[0].scope, "Do something"); // defaults to title
+    assert.equal(parsed.tasks[0].agent, "codex"); // default agent
+    assert.deepEqual(parsed.tasks[0].acceptance_criteria, ["Do something"]); // defaults to [title]
+    assert.equal(parsed.mode, "sequential"); // invalid mode → default sequential
+    assert.equal(parsed.estimated_complexity, "high"); // invalid complexity → default high
+  } finally {
+    cleanup();
+  }
+}
+
+function testPlannerJsonIgnoresProseOutsideFence() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    const output = `I analyzed the request and here are the tasks:
+
+Some additional context about why I chose these tasks.
+
+\`\`\`json
+{
+  "tasks": [{"id": "task-1", "title": "Single task", "scope": "src/main.ts", "acceptance_criteria": ["Works"], "agent": "codex"}],
+  "mode": "solo",
+  "estimated_complexity": "low"
+}
+\`\`\`
+
+Let me know if you want changes.`;
+
+    const parsed = planner.parsePlannerJson(output);
+    assert.ok(parsed);
+    assert.equal(parsed.tasks.length, 1);
+    assert.equal(parsed.tasks[0].title, "Single task");
+    assert.equal(parsed.mode, "solo");
+    assert.equal(parsed.estimated_complexity, "low");
+  } finally {
+    cleanup();
+  }
+}
+
+function testExtractFencedJsonHandlesGenericFence() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    // Generic ``` block with JSON content (no "json" language tag)
+    const output = "Here:\n```\n{\"tasks\": [{\"id\": \"task-1\", \"title\": \"Test\", \"scope\": \"x\", \"acceptance_criteria\": [\"y\"], \"agent\": \"codex\"}], \"mode\": \"solo\", \"estimated_complexity\": \"low\"}\n```";
+    const json = planner.extractFencedJson(output);
+    assert.ok(json);
+    assert.ok(json.startsWith("{"));
+
+    // Generic ``` block with non-JSON content should be skipped
+    const nonJson = "Here:\n```\nThis is not JSON\n```";
+    const result = planner.extractFencedJson(nonJson);
+    assert.equal(result, null);
+  } finally {
+    cleanup();
+  }
+}
+
+async function testModelPlannerUsesJsonPrimary() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    const plan = await planner.buildModelPlan(
+      "Implement feature X",
+      "",
+      "/tmp/project",
+      async ({ requestedModel }) => {
+        if (requestedModel !== "opus") throw new Error("not opus");
+        return {
+          launchModel: "opus",
+          output: '```json\n{"tasks": [{"id": "task-1", "title": "Implement feature X", "scope": "src/feature.ts", "acceptance_criteria": ["Feature works"], "agent": "codex"}], "mode": "solo", "estimated_complexity": "medium"}\n```',
+        };
+      },
+    );
+
+    assert.equal(plan.plannerMetadata.backend, "model");
+    assert.equal(plan.plannerMetadata.model, "opus");
+    assert.equal(plan.tasks.length, 1);
+    assert.equal(plan.tasks[0].title, "Implement feature X");
+  } finally {
+    cleanup();
+  }
+}
+
 const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
@@ -232,6 +393,12 @@ const tests = [
   ["reviewer backend selection routes GPT reviewer to Codex", testReviewerBackendSelection],
   ["claude model resolution normalizes canonical refs", testClaudeModelResolutionNormalizesCanonicalRefs],
   ["reviewer command uses Codex read-only path", testReviewerCommandUsesCodexReadOnlyPath],
+  ["planner JSON parser: parses fenced JSON with surrounding prose", testPlannerJsonParsesFencedJson],
+  ["planner JSON parser: rejects invalid/missing JSON", testPlannerJsonRejectsInvalidJson],
+  ["planner JSON parser: defaults and normalization", testPlannerJsonDefaultsAndNormalization],
+  ["planner JSON parser: ignores prose outside fence", testPlannerJsonIgnoresProseOutsideFence],
+  ["planner JSON parser: handles generic fence block", testExtractFencedJsonHandlesGenericFence],
+  ["model planner uses JSON as primary parse path", testModelPlannerUsesJsonPrimary],
 ];
 
 (async () => {

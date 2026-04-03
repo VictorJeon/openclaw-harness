@@ -93,7 +93,9 @@ export class Session {
   // Output
   outputBuffer: string[] = [];
 
-  // Result
+  // Result — authoritative terminal result record.
+  // Set on every SDK result event. The LAST write wins (multi-turn keeps updating).
+  // Once status becomes terminal (completed/failed/killed), this is frozen.
   result?: {
     subtype: string;
     duration_ms: number;
@@ -102,6 +104,22 @@ export class Session {
     result?: string;
     is_error: boolean;
     session_id: string;
+  };
+
+  // Terminal result snapshot — set exactly once when the session transitions to
+  // a terminal state (completed/failed/killed). This is the authoritative record.
+  // Unlike `result` (which is overwritten on every SDK result event including
+  // multi-turn end-of-turn), `terminalResult` is immutable after first write.
+  terminalResult?: {
+    status: SessionStatus;
+    subtype: string;
+    result?: string;
+    is_error: boolean;
+    costUsd: number;
+    num_turns: number;
+    duration_ms: number;
+    completedAt: number;
+    hasUsableOutput: boolean;
   };
 
   // Cost
@@ -137,6 +155,55 @@ export class Session {
   onComplete?: (session: Session) => void;
   onWaitingForInput?: (session: Session) => void;
 
+  /**
+   * Freeze the terminal result record. Called exactly once when the session
+   * transitions to a terminal state. Subsequent calls are no-ops (idempotent).
+   * Logs a diagnostic warning if the session reaches terminal state without
+   * a usable result payload.
+   */
+  private freezeTerminalState(terminalStatus: SessionStatus): void {
+    if (this.terminalResult) {
+      // Already frozen — guard against double-freeze (e.g. kill after fail)
+      console.warn(
+        `[Session] ${this.id} freezeTerminalState called again (current=${this.terminalResult.status}, new=${terminalStatus}) — ignoring`,
+      );
+      return;
+    }
+
+    const now = Date.now();
+    const hasResult = !!this.result;
+    const hasOutput = this.outputBuffer.length > 0;
+    const hasResultText = !!(this.result?.result);
+    const hasUsableOutput = hasOutput || hasResultText;
+
+    this.terminalResult = {
+      status: terminalStatus,
+      subtype: this.result?.subtype ?? "unknown",
+      result: this.result?.result,
+      is_error: this.result?.is_error ?? (terminalStatus !== "completed"),
+      costUsd: this.costUsd,
+      num_turns: this.result?.num_turns ?? 0,
+      duration_ms: this.result?.duration_ms ?? (now - this.startedAt),
+      completedAt: now,
+      hasUsableOutput,
+    };
+
+    // Diagnostic: warn when terminal state has no usable result
+    if (!hasUsableOutput) {
+      console.warn(
+        `[Session] ${this.id} reached terminal state="${terminalStatus}" without usable output. ` +
+        `hasResult=${hasResult}, hasOutput=${hasOutput}, hasResultText=${hasResultText}, ` +
+        `subtype=${this.result?.subtype ?? "none"}, error=${this.error ?? "none"}`,
+      );
+    } else {
+      console.log(
+        `[Session] ${this.id} terminal state frozen: status=${terminalStatus}, ` +
+        `subtype=${this.result?.subtype ?? "none"}, cost=$${this.costUsd.toFixed(4)}, ` +
+        `turns=${this.result?.num_turns ?? 0}, outputLines=${this.outputBuffer.length}`,
+      );
+    }
+  }
+
   constructor(config: SessionConfig, name: string) {
     this.id = nanoid(8);
     this.name = name;
@@ -164,6 +231,7 @@ export class Session {
         this.status = "failed";
         this.error = err?.message ?? String(err);
         this.completedAt = Date.now();
+        this.freezeTerminalState("failed");
         this.clearSafetyNetTimer();
         if (this.idleTimer) clearTimeout(this.idleTimer);
       }
@@ -255,6 +323,7 @@ export class Session {
         this.status = "failed";
         this.error = errorMessage;
         this.completedAt = Date.now();
+        this.freezeTerminalState("failed");
         this.clearSafetyNetTimer();
         if (this.idleTimer) clearTimeout(this.idleTimer);
       }
@@ -426,8 +495,12 @@ export class Session {
           // Session is truly done — either single-turn, or multi-turn with error/budget
           this.clearSafetyNetTimer();
           if (this.idleTimer) clearTimeout(this.idleTimer);
-          this.status = msg.subtype === "success" ? "completed" : "failed";
+          const terminalStatus = msg.subtype === "success" ? "completed" : "failed";
+          this.status = terminalStatus;
           this.completedAt = Date.now();
+
+          // Freeze the authoritative terminal result before any callbacks
+          this.freezeTerminalState(terminalStatus);
 
           // End the message stream if multi-turn
           if (this.messageStream) {
@@ -459,6 +532,7 @@ export class Session {
     this.clearSafetyNetTimer();
     this.status = "killed";
     this.completedAt = Date.now();
+    this.freezeTerminalState("killed");
     // End the message stream
     if (this.messageStream) {
       this.messageStream.end();
