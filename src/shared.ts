@@ -5,6 +5,7 @@ import type { PluginConfig } from "./types";
 
 export let sessionManager: SessionManager | null = null;
 export let notificationRouter: NotificationRouter | null = null;
+export let pluginRuntime: any = null;
 
 /**
  * Plugin config — populated at service start from api.getConfig().
@@ -70,6 +71,33 @@ export function setSessionManager(sm: SessionManager | null): void {
 
 export function setNotificationRouter(nr: NotificationRouter | null): void {
   notificationRouter = nr;
+}
+
+export function setPluginRuntime(runtime: any): void {
+  pluginRuntime = runtime;
+}
+
+export function isLegacyToolsEnabled(): boolean {
+  return !!(pluginConfig as any).enableLegacyTools;
+}
+
+export function legacyToolDisabledResult(toolName: string) {
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `Error: ${toolName} is disabled. Legacy harness tools are off; use harness_execute instead, or enable plugins.entries.openclaw-harness.config.enableLegacyTools if you intentionally want the old direct Claude surfaces.`,
+      },
+    ],
+  };
+}
+
+export function legacyCommandDisabledResult(commandName: string) {
+  return {
+    text:
+      `Error: /${commandName} is disabled. Legacy harness commands are off; use harness_execute instead, or enable plugins.entries.openclaw-harness.config.enableLegacyTools if you intentionally want the old direct Claude surfaces.`,
+  };
 }
 
 /**
