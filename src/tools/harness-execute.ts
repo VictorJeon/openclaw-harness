@@ -5,6 +5,7 @@ import { buildPlan, searchMemory } from "../planner";
 import { initCheckpoint, loadCheckpoint, updateTaskStatus, recordSession } from "../checkpoint";
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
+import { resolveReviewerExecutionTarget, runReviewerWithCodexCli } from "../reviewer-runner";
 import type {
   OpenClawPluginToolContext,
   HarnessPlan,
@@ -354,7 +355,10 @@ async function executeTask(
 
     // --- Review phase: cross-model review loop ---
     const reviewLoop = initReviewLoop(task.id);
-    const reviewModel = pluginConfig.reviewModel || pluginConfig.defaultModel;
+    const reviewerTarget = resolveReviewerExecutionTarget(
+      pluginConfig.reviewModel,
+      pluginConfig.defaultModel,
+    );
     let currentWorkerResult = workerResult;
 
     while (!reviewLoop.passed && !reviewLoop.escalated) {
@@ -363,25 +367,44 @@ async function executeTask(
       remainingBudget -= reviewBudget;
 
       const reviewPrompt = buildReviewRequest(task, currentWorkerResult, plan.originalRequest, reviewLoop);
-      const reviewerSession = sessionManager!.spawn({
-        prompt: reviewPrompt,
-        name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
-        workdir,
-        model: reviewModel,
-        maxBudgetUsd: reviewBudget,
-        systemPrompt: REVIEWER_SYSTEM_PROMPT,
-        permissionMode: "default", // Restrictive: no bypass
-        allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
-        originChannel: ctx.messageChannel,
-        originAgentId: ctx.agentId,
-        multiTurn: false,
-      });
+      const reviewerRunLabel = `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`;
 
-      recordSession(checkpoint, task.id, "reviewer", reviewerSession.id, workdir);
-      console.log(`[harness] Reviewer spawned: task=${task.id}, session=${reviewerSession.id}, loop=${reviewLoop.history.length + 1}`);
+      let reviewerSessionId = "";
+      let reviewOutput = "";
 
-      // Wait for reviewer to complete
-      const reviewOutput = await waitForOutput(reviewerSession.id);
+      if (reviewerTarget.backend === "codex-cli") {
+        const codexRun = await runReviewerWithCodexCli({
+          prompt: reviewPrompt,
+          workdir,
+          model: reviewerTarget.launchModel,
+        });
+        reviewerSessionId = codexRun.sessionId;
+        recordSession(checkpoint, task.id, "reviewer", reviewerSessionId, workdir);
+        console.log(`[harness] Reviewer spawned via Codex CLI: task=${task.id}, session=${reviewerSessionId}, model=${codexRun.model ?? reviewerTarget.launchModel ?? "default"}, loop=${reviewLoop.history.length + 1}`);
+        reviewOutput = codexRun.output;
+      } else {
+        const reviewerSession = sessionManager!.spawn({
+          prompt: reviewPrompt,
+          name: reviewerRunLabel,
+          workdir,
+          model: reviewerTarget.launchModel,
+          maxBudgetUsd: reviewBudget,
+          systemPrompt: REVIEWER_SYSTEM_PROMPT,
+          permissionMode: "default", // Restrictive: no bypass
+          allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
+          originChannel: ctx.messageChannel,
+          originAgentId: ctx.agentId,
+          multiTurn: false,
+        });
+
+        reviewerSessionId = reviewerSession.id;
+        recordSession(checkpoint, task.id, "reviewer", reviewerSessionId, workdir);
+        console.log(`[harness] Reviewer spawned via Claude session: task=${task.id}, session=${reviewerSessionId}, model=${reviewerTarget.launchModel ?? "default"}, loop=${reviewLoop.history.length + 1}`);
+
+        // Wait for reviewer to complete
+        reviewOutput = await waitForOutput(reviewerSession.id);
+      }
+
       const reviewResult = parseReviewOutput(reviewOutput, task.id);
 
       const action = processReviewResult(reviewLoop, reviewResult);
