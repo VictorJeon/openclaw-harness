@@ -5,7 +5,6 @@ import { buildPlan, searchMemory } from "../planner";
 import { initCheckpoint, loadCheckpoint, updateTaskStatus, recordSession } from "../checkpoint";
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
-import { resolveClaudeLaunchModel } from "../model-resolution";
 import type {
   OpenClawPluginToolContext,
   HarnessPlan,
@@ -355,11 +354,7 @@ async function executeTask(
 
     // --- Review phase: cross-model review loop ---
     const reviewLoop = initReviewLoop(task.id);
-    const reviewModel = resolveClaudeLaunchModel(
-      pluginConfig.reviewModel,
-      pluginConfig.workerModel,
-      pluginConfig.defaultModel,
-    );
+    const reviewModel = pluginConfig.reviewModel || pluginConfig.defaultModel;
     let currentWorkerResult = workerResult;
 
     while (!reviewLoop.passed && !reviewLoop.escalated) {

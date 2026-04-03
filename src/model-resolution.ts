@@ -144,28 +144,3 @@ export function resolveModelAlias(model?: string): string | undefined {
   const aliases = loadAliasIndex();
   return aliases.get(trimmed.toLowerCase()) ?? trimmed;
 }
-
-export function isClaudeCompatibleModel(model?: string): boolean {
-  const resolved = resolveModelAlias(model);
-  if (!resolved) return false;
-
-  const normalized = resolved.toLowerCase();
-  return normalized.includes("claude") || normalized.startsWith("anthropic/");
-}
-
-/**
- * Claude Code sessions can only launch Claude-compatible models. If the
- * preferred configured model points to a non-Claude provider (for example
- * openai-codex), fall back to the first Claude-compatible candidate.
- */
-export function resolveClaudeLaunchModel(...candidates: Array<string | undefined>): string | undefined {
-  const resolved = candidates
-    .map((candidate) => resolveModelAlias(candidate))
-    .filter((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
-
-  for (const candidate of resolved) {
-    if (isClaudeCompatibleModel(candidate)) return candidate;
-  }
-
-  return resolved[0];
-}
