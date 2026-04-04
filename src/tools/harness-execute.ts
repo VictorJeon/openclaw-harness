@@ -352,6 +352,7 @@ async function executeTask(
       permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
       originChannel: ctx.messageChannel,
       originAgentId: ctx.agentId,
+      internal: true,
       multiTurn: false, // Single-turn: completes when done
     });
 
@@ -417,6 +418,7 @@ async function executeTask(
           allowedTools: ["Read", "Glob", "Grep", "LS"], // Read-only tools only
           originChannel: ctx.messageChannel,
           originAgentId: ctx.agentId,
+          internal: true,
           multiTurn: false,
         });
 
@@ -480,6 +482,7 @@ async function executeTask(
           permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
           originChannel: ctx.messageChannel,
           originAgentId: ctx.agentId,
+          internal: true,
           multiTurn: false,
         });
 
@@ -704,15 +707,63 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function extractFilePaths(output: string): string[] {
-  const paths: string[] = [];
-  const matches = output.match(/(?:^|\s)((?:src|lib|app|pages|components)\/[\w\-./]+\.\w+)/gm);
-  if (matches) {
-    for (const m of matches) {
-      paths.push(m.trim());
-    }
+const KNOWN_FILE_EXTENSIONS = new Set([
+  "ts", "tsx", "js", "jsx", "mjs", "cjs",
+  "py", "rb", "php", "go", "rs", "java", "kt", "swift",
+  "json", "yaml", "yml", "toml", "ini", "conf",
+  "md", "mdx", "txt", "rst",
+  "css", "scss", "sass", "less", "html", "sql", "sh", "bash",
+  "lock", "lockb", "env",
+]);
+
+function normalizeFileCandidate(raw: string): string | null {
+  const candidate = raw
+    .trim()
+    .replace(/^[`'"([{<]+/, "")
+    .replace(/[`'"\])}>:;,]+$/, "")
+    .replace(/^\.\//, "");
+
+  if (!candidate || candidate.includes("://") || candidate.includes("@")) {
+    return null;
   }
-  return [...new Set(paths)];
+
+  const base = candidate.split("/").pop() ?? candidate;
+  if (!base.includes(".")) {
+    return null;
+  }
+
+  if (base.startsWith(".")) {
+    if (base === ".env" || base.startsWith(".env.")) return candidate;
+    const dotExt = base.slice(1).split(".").pop()?.toLowerCase() ?? "";
+    return KNOWN_FILE_EXTENSIONS.has(dotExt) ? candidate : null;
+  }
+
+  const ext = base.split(".").pop()?.toLowerCase() ?? "";
+  if (!KNOWN_FILE_EXTENSIONS.has(ext)) {
+    return null;
+  }
+
+  return candidate;
+}
+
+export function extractFilePaths(output: string): string[] {
+  const paths = new Set<string>();
+  const tokenPattern = /(?:^|[\s([{<"'])((?:\.\/)?(?:[\w.-]+\/)*[\w.-]*\.[\w.-]+)(?=$|[\s)\]}>"':;,])/gm;
+  const backtickPattern = /`([^`\n]+)`/g;
+
+  const collect = (text: string, pattern: RegExp) => {
+    for (const match of text.matchAll(pattern)) {
+      const normalized = normalizeFileCandidate(match[1] ?? match[0] ?? "");
+      if (normalized) {
+        paths.add(normalized);
+      }
+    }
+  };
+
+  collect(output, tokenPattern);
+  collect(output, backtickPattern);
+
+  return [...paths];
 }
 
 function extractTestCount(output: string): number {

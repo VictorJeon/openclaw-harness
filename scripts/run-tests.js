@@ -377,6 +377,64 @@ async function testModelPlannerUsesJsonPrimary() {
   }
 }
 
+function testExtractFilePathsCapturesRootAndNestedFiles() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+
+  try {
+    const output = [
+      "Files changed:",
+      "- calc.py",
+      "- cli.py",
+      "- README.md",
+      "- src/tools/harness-execute.ts",
+      "- ./test_calc.py",
+      "See also `package.json` and `.env.example`",
+    ].join("\n");
+
+    const files = harnessExecute.extractFilePaths(output);
+    assert.deepEqual(files, [
+      "calc.py",
+      "cli.py",
+      "README.md",
+      "src/tools/harness-execute.ts",
+      "test_calc.py",
+      "package.json",
+      ".env.example",
+    ]);
+  } finally {
+    cleanup();
+  }
+}
+
+function testCheckpointMarksFailedWhenTaskFailsEarly() {
+  const { mod: checkpointMod, cleanup } = loadTsModule("src/checkpoint.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-checkpoint-"));
+
+  try {
+    const plan = {
+      id: "plan-test-fail-early",
+      originalRequest: "test",
+      tasks: [
+        { id: "task-1", title: "one", scope: "calc.py", acceptanceCriteria: ["a"], agent: "codex" },
+        { id: "task-2", title: "two", scope: "cli.py", acceptanceCriteria: ["b"], agent: "codex" },
+      ],
+      mode: "sequential",
+      estimatedComplexity: "medium",
+      tier: 2,
+    };
+
+    const checkpoint = checkpointMod.initCheckpoint(plan, workdir);
+    checkpointMod.updateTaskStatus(checkpoint, "task-1", "failed", workdir, {
+      reviewPassed: false,
+    });
+
+    assert.equal(checkpoint.status, "failed");
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
@@ -391,6 +449,8 @@ const tests = [
   ["planner JSON parser: ignores prose outside fence", testPlannerJsonIgnoresProseOutsideFence],
   ["planner JSON parser: handles generic fence block", testExtractFencedJsonHandlesGenericFence],
   ["model planner uses JSON as primary parse path", testModelPlannerUsesJsonPrimary],
+  ["extractFilePaths captures root and nested repo files", testExtractFilePathsCapturesRootAndNestedFiles],
+  ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
 ];
 
 (async () => {

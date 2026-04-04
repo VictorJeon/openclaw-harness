@@ -170,11 +170,14 @@ async function runCommand(
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
+    let hardKillTimer: NodeJS.Timeout | null = null;
 
     const finish = (err?: Error, output?: string) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
 
       if (err) {
         reject(err);
@@ -185,8 +188,15 @@ async function runCommand(
     };
 
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
-      finish(new Error(`Reviewer Codex CLI timed out after ${timeoutMs}ms`));
+      hardKillTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // best-effort hard kill
+        }
+      }, 5000);
     }, timeoutMs);
 
     child.stdout.on("data", (chunk) => {
@@ -209,8 +219,16 @@ async function runCommand(
         return;
       }
 
+      if (timedOut && finalOutput) {
+        console.warn(`[harness] Reviewer Codex CLI exceeded timeout (${timeoutMs}ms) but produced final output; salvaging result.`);
+        finish(undefined, finalOutput);
+        return;
+      }
+
       const details = [
-        `Reviewer Codex CLI exited with code ${code ?? "unknown"}${signal ? ` (signal ${signal})` : ""}.`,
+        timedOut
+          ? `Reviewer Codex CLI timed out after ${timeoutMs}ms${signal ? ` (signal ${signal})` : ""}.`
+          : `Reviewer Codex CLI exited with code ${code ?? "unknown"}${signal ? ` (signal ${signal})` : ""}.`,
         stderr.trim(),
         stdout.trim(),
       ].filter(Boolean).join("\n\n");

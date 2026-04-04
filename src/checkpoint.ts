@@ -106,15 +106,23 @@ export function updateTaskStatus(
 
   checkpoint.lastUpdated = new Date().toISOString();
 
-  // Check if all tasks are complete
+  const hasActive = checkpoint.tasks.some(
+    (t) => t.status === "in-progress" || t.status === "in-review",
+  );
+  const hasFailed = checkpoint.tasks.some((t) => t.status === "failed");
   const allDone = checkpoint.tasks.every(
     (t) => t.status === "completed" || t.status === "failed",
   );
+  const allPassed = checkpoint.tasks.every(
+    (t) => t.status === "completed" && t.reviewPassed,
+  );
+
   if (allDone) {
-    const allPassed = checkpoint.tasks.every(
-      (t) => t.status === "completed" && t.reviewPassed,
-    );
     checkpoint.status = allPassed ? "complete" : "failed";
+  } else if (hasFailed && !hasActive) {
+    checkpoint.status = "failed";
+  } else {
+    checkpoint.status = "running";
   }
 
   saveCheckpoint(checkpoint, workdir);
