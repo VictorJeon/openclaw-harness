@@ -3,14 +3,14 @@ import type { Tier } from "./types";
 /**
  * Router: classify incoming request complexity into tier 0/1/2.
  *
- * Tier 0: Config/docs/simple patches — OpenClaw agent handles directly
- * Tier 1: Simple-to-medium coding — ACP Worker + Review loop
- * Tier 2: Complex/multi-task — Plan → Approve → Worker + Review loop
+ * Tier 0: Config/docs/simple patches — caller agent handles directly
+ * Tier 1: Simple-to-medium coding — realtime worker + review loop
+ * Tier 2: Complex/multi-task — richer decomposition + plan review + same realtime worker path
  *
- * Classification: 3-layer cascade (Citadel-inspired)
- *   1. Pattern match (0 tokens): regex for config/doc changes → tier 0
- *   2. Keyword (~0 tokens): "refactoring", "new feature", "bug fix" → tier 1
- *   3. LLM classification (~500 tokens): ambiguous → tier 2
+ * Classification is deterministic:
+ *   1. Pattern match: regex for config/doc changes → tier 0
+ *   2. Keyword scoring: bug / feature / migration signals → tier 1 or 2
+ *   3. Fallback heuristics: ambiguous length / task-count rules
  */
 
 // Tier 0 patterns: settings, docs, trivial patches
@@ -68,7 +68,7 @@ const TIER2_KEYWORDS = [
 
 export interface RouteResult {
   tier: Tier;
-  confidence: "pattern" | "keyword" | "llm";
+  confidence: "pattern" | "keyword" | "fallback";
   reason: string;
 }
 
@@ -140,20 +140,20 @@ export function classifyRequest(request: string): RouteResult {
     };
   }
 
-  // Layer 3: Ambiguous — no keywords, no multi-task signals
+  // Layer 3: Fallback heuristics for ambiguous requests
   // Long requests or complex phrasing → tier 2, else default tier 1
   if (normalized.length > 200) {
     return {
       tier: 2,
-      confidence: "llm",
-      reason: `Long ambiguous request (${normalized.length} chars), needs LLM classification`,
+      confidence: "fallback",
+      reason: `Long ambiguous request (${normalized.length} chars), fallback heuristics chose tier 2`,
     };
   }
 
   return {
     tier: 1,
-    confidence: "llm",
-    reason: "No strong signals — default tier 1, LLM classification recommended",
+    confidence: "fallback",
+    reason: "No strong signals — fallback heuristics defaulted to tier 1",
   };
 }
 

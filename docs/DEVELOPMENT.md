@@ -70,6 +70,7 @@ openclaw-harness/
 - completed realtime worker results recover on resume
 
 ### Planner behavior
+- planner is deterministic; do not assume a hidden model call here
 - common single-feature workflows should usually stay one task
 - avoid reintroducing over-decomposition for tiny coding requests
 
@@ -109,6 +110,7 @@ Typical smoke patterns:
 If you change any of these, update docs in the same PR/commit set:
 - tier routing rules
 - planner decomposition rules
+- whether router/planner are deterministic vs model-driven
 - review loop behavior
 - worker/reviewer model choice
 - legacy vs primary execution guidance

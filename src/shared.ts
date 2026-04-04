@@ -56,6 +56,7 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     operationMode: (config as any).operationMode ?? "delegate",
     maxReviewLoops: (config as any).maxReviewLoops ?? 4,
     reviewModel: (config as any).reviewModel,
+    realtimeModel: (config as any).realtimeModel,
     workerModel: (config as any).workerModel,
     memoryV3Endpoint: (config as any).memoryV3Endpoint,
     routerMaxTokens: (config as any).routerMaxTokens ?? 500,

@@ -1,14 +1,12 @@
 import type { HarnessPlan, TaskSpec, Tier } from "./types";
-import { pluginConfig } from "./shared";
 
 /**
- * Planner: decompose a request into concrete tasks with acceptance criteria.
+ * Deterministic planner: decompose a request into concrete tasks with
+ * acceptance criteria.
  *
- * Before decomposition, optionally queries Memory V3 for context
- * (previous implementations, decisions, lessons learned).
- *
- * Output: HarnessPlan with tasks, mode (solo/parallel/sequential),
- * and estimated complexity.
+ * No model call happens here. The planner is intentionally heuristic-only so
+ * routing/planning stays cheap, predictable, and independent of worker model
+ * selection.
  */
 
 function nextPlanId(): string {
@@ -22,38 +20,10 @@ function nextTaskId(index: number): string {
 }
 
 /**
- * Query Memory V3 for relevant context before planning.
- * Returns memory search results or empty string if unavailable.
+ * Generate a plan deterministically.
+ * Tier 1 stays single-task. Tier 2 may decompose into multiple tasks.
  */
-export async function searchMemory(projectName: string): Promise<string> {
-  const endpoint = pluginConfig.memoryV3Endpoint;
-  if (!endpoint) return "";
-
-  try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: `${projectName} 현재 상태` }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return "";
-    const data = await res.json();
-    return typeof data === "string" ? data : JSON.stringify(data);
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Generate a plan by sending the request to an LLM for task decomposition.
- * For tier 1 (simple tasks), creates a single-task plan.
- * For tier 2 (complex tasks), decomposes into multiple tasks.
- */
-export function buildPlan(
-  request: string,
-  tier: Tier,
-  memoryContext: string = "",
-): HarnessPlan {
+export function buildPlan(request: string, tier: Tier): HarnessPlan {
   if (tier === 0) {
     // Tier 0: direct execution, no plan needed
     return {
@@ -102,50 +72,6 @@ export function buildPlan(
     estimatedComplexity: "high",
     tier: 2,
   };
-}
-
-/**
- * Generate the LLM prompt for task decomposition (tier 2).
- * This prompt is sent to ACP Claude for planning.
- */
-export function buildPlannerPrompt(request: string, memoryContext: string): string {
-  const parts = [
-    `You are a task planner. Decompose this request into concrete, independent tasks.`,
-    ``,
-    `## Request`,
-    request,
-  ];
-
-  if (memoryContext) {
-    parts.push(``, `## Memory Context (previous work)`, memoryContext);
-  }
-
-  parts.push(
-    ``,
-    `## Output Format (YAML)`,
-    `tasks:`,
-    `  - id: task-1`,
-    `    title: "<short title>"`,
-    `    scope: "<specific files/functions to modify>"`,
-    `    acceptance_criteria:`,
-    `      - "<concrete, testable criterion>"`,
-    `    agent: codex`,
-    `  - id: task-2`,
-    `    ...`,
-    `mode: parallel | sequential | solo`,
-    `estimated_complexity: low | medium | high`,
-    ``,
-    `## Rules`,
-    `- Each task must be independently executable`,
-    `- Scope must be specific (file paths, function names)`,
-    `- Acceptance criteria must be testable`,
-    `- Use "codex" as default agent`,
-    `- Use "parallel" when tasks don't share files`,
-    `- Use "sequential" when later tasks depend on earlier ones`,
-    `- Maximum 6 tasks per plan`,
-  );
-
-  return parts.join("\n");
 }
 
 // --- Helper functions ---

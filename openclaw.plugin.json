@@ -17,7 +17,7 @@
       },
       "defaultModel": {
         "type": "string",
-        "description": "Default model for new sessions (e.g. 'sonnet', 'opus')"
+        "description": "Default model for legacy direct sessions and reviewer fallback"
       },
       "defaultWorkdir": {
         "type": "string",
@@ -79,30 +79,34 @@
       },
       "reviewModel": {
         "type": "string",
-        "description": "Model for cross-model review (defaults to codex). Should differ from worker model for blind-spot detection."
+        "description": "Model for Codex-side review. Should differ from the realtime worker model for blind-spot detection."
+      },
+      "realtimeModel": {
+        "type": "string",
+        "description": "Preferred model selector for the tier 1+ Claude realtime worker (for example: 'sonnet', 'opus', or canonical Anthropic refs)."
       },
       "workerModel": {
         "type": "string",
-        "description": "Model for worker execution (defaults to claude). Used for tier 1 coding tasks."
+        "description": "Legacy fallback alias for realtimeModel. Still honored for compatibility."
       },
       "memoryV3Endpoint": {
         "type": "string",
-        "description": "Memory V3 search endpoint (e.g. http://127.0.0.1:18790/v1/memory/search)"
+        "description": "Deprecated no-op. Planner is deterministic and no longer queries Memory V3."
       },
       "routerMaxTokens": {
         "type": "number",
         "default": 500,
-        "description": "Max tokens for Router tier classification"
+        "description": "Deprecated no-op. Router classification is now deterministic."
       },
       "plannerMaxTokens": {
         "type": "number",
         "default": 2000,
-        "description": "Max tokens for Planner output"
+        "description": "Deprecated no-op. Planner no longer performs model calls."
       },
       "reviewerMaxTokens": {
         "type": "number",
         "default": 1000,
-        "description": "Max tokens per task for Reviewer output"
+        "description": "Deprecated no-op. Reviewer token caps are not currently enforced here."
       },
       "enableLegacyTools": {
         "type": "boolean",

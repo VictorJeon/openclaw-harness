@@ -1,12 +1,12 @@
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { basename, join, resolve } from "path";
 import { Type } from "@sinclair/typebox";
 import { sessionManager, pluginConfig, getPluginRuntime } from "../shared";
 import { classifyRequest } from "../router";
-import { buildPlan, searchMemory } from "../planner";
+import { buildPlan } from "../planner";
 import {
   getPendingTasks,
   initCheckpoint,
@@ -200,16 +200,8 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
         };
       }
 
-      // Step 3: Memory V3 prefetch (best-effort)
-      let memoryContext = "";
-      try {
-        memoryContext = await searchMemory(workdir.split("/").pop() ?? "project");
-      } catch {
-        // non-fatal
-      }
-
-      // Step 4: Plan
-      const plan = buildPlan(params.request, tier, memoryContext);
+      // Step 3: Plan
+      const plan = buildPlan(params.request, tier);
       console.log(`[harness] Plan: id=${plan.id}, tasks=${plan.tasks.length}, mode=${plan.mode}`);
 
       // Step 5: Initialize checkpoint
@@ -395,9 +387,9 @@ async function executeTask(
   ctx: OpenClawPluginToolContext,
   checkpoint: CheckpointData,
 ): Promise<TaskExecutionResult> {
-  // workerModel is preserved in config for legacy compatibility but is ignored
-  // for realtime-worker execution. The realtime model is resolved via resolveRealtimeModel().
-  const workerModel = pluginConfig.workerModel ?? "claude";
+  // realtimeModel is the preferred config key for tier 1+ Claude realtime
+  // workers. workerModel remains as a legacy fallback for compatibility.
+  const workerModel = pluginConfig.realtimeModel ?? pluginConfig.workerModel ?? "claude";
   const reviewModel = pluginConfig.reviewModel ?? "codex";
   // 2026-04-04 unification: all coding work (tier 1+) routes through the realtime worker.
   // The Claude SDK subagent / sessionManager worker paths are deprecated for coding tasks.
@@ -970,89 +962,6 @@ async function syncRealtimeWorktreeFromRemote(workdir: string): Promise<void> {
   console.log(
     `[harness] Tier 2 sync pull complete: workdir=${workdir}, remote=${REALTIME_REMOTE_HOST}${output ? `, output=${output}` : ""}`,
   );
-}
-
-async function runCodexAcpReview(
-  reviewPrompt: string,
-  workdir: string,
-  planId: string,
-  taskId: string,
-  reviewAttempt: number,
-): Promise<{ output: string; reviewerSessionId: string }> {
-  const tempDir = mkdtempSync(join(tmpdir(), "harness-codex-review-"));
-  const promptPath = join(tempDir, `review-${taskId}-${reviewAttempt}.txt`);
-  writeFileSync(promptPath, `${REVIEWER_SYSTEM_PROMPT}\n\n---\n\n${reviewPrompt}\n`, "utf8");
-
-  try {
-    const canonicalWorkdir = canonicalizeAcpWorkdir(workdir);
-    const sessionName = buildCodexReviewerSessionName(planId, taskId);
-    const command = existsSync("/opt/homebrew/bin/acpx-clean") ? "/opt/homebrew/bin/acpx-clean" : "acpx-clean";
-    const sessionId = await ensureNamedCodexAcpSession(command, canonicalWorkdir, sessionName);
-    const result = await execFileCapture(
-      command,
-      ["codex", "prompt", "-s", sessionName, "-f", promptPath],
-      canonicalWorkdir,
-      300000,
-    );
-    const output = sanitizeCodexPromptOutput(result.stdout);
-    const errorOutput = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    if (result.exitCode !== 0 || !output) {
-      throw new Error(`Codex ACP review failed (exit ${result.exitCode})${errorOutput ? `\n${errorOutput}` : ""}`);
-    }
-    return {
-      output,
-      reviewerSessionId: `acp:codex:${sessionId}`,
-    };
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
-}
-
-function canonicalizeAcpWorkdir(workdir: string): string {
-  try {
-    return realpathSync(workdir);
-  } catch {
-    return resolve(workdir);
-  }
-}
-
-function buildCodexReviewerSessionName(planId: string, taskId: string): string {
-  return `harness-review-${planId}-${taskId}`.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
-}
-
-async function ensureNamedCodexAcpSession(
-  command: string,
-  workdir: string,
-  sessionName: string,
-): Promise<string> {
-  const shown = await execFileCapture(command, ["codex", "sessions", "show", sessionName], workdir, 30000);
-  if (shown.exitCode === 0) {
-    const existingId = parseCodexSessionId(shown.stdout);
-    if (existingId) return existingId;
-  }
-
-  const created = await execFileCapture(command, ["codex", "sessions", "new", "--name", sessionName], workdir, 60000);
-  if (created.exitCode !== 0) {
-    const output = [created.stdout, created.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(`Failed to create Codex ACP reviewer session ${sessionName}${output ? `\n${output}` : ""}`);
-  }
-
-  const confirmed = await execFileCapture(command, ["codex", "sessions", "show", sessionName], workdir, 30000);
-  if (confirmed.exitCode !== 0) {
-    const output = [confirmed.stdout, confirmed.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(`Failed to confirm Codex ACP reviewer session ${sessionName}${output ? `\n${output}` : ""}`);
-  }
-
-  const sessionId = parseCodexSessionId(confirmed.stdout);
-  if (!sessionId) {
-    throw new Error(`Unable to parse Codex ACP reviewer session id for ${sessionName}`);
-  }
-  return sessionId;
-}
-
-function parseCodexSessionId(output: string): string | null {
-  const match = output.match(/^id:\s*([^\s]+)$/m);
-  return match?.[1]?.trim() || null;
 }
 
 function sanitizeCodexPromptOutput(stdout: string): string {

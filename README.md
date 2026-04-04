@@ -13,21 +13,21 @@ The old direct Claude session tools still exist, but they are the **legacy surfa
 
 ---
 
-## Current verified state (2026-04-01)
+## Current verified state (2026-04-04)
 
 Verified in live smoke runs:
 - caller-agent direct **plan review** for tier 2
-- **Codex ACP** final review
-- tier 2 realtime **resume-safe** recovery
-- tier 2 same-session follow-up review/fix/re-review
-- tier 1 worker continuity + **persistent Codex reviewer session**
-- single-feature workflow collapse (fewer unnecessary task splits)
+- **Codex CLI** final review
+- tier 1+ realtime worker routing confirmed
+- realtime follow-up fixes continue in the **same Claude session** via `--resume`
+- local sync-back materializes as **uncommitted worktree diff** (not merge commits)
+- single-feature workflow collapse still works
 
 Recent implementation commits:
-- `e3ba164` — embedded plan review + tier 2 sync
-- `f8c2e76` — single-feature workflow collapse
-- `4827ef5` — tier 2 realtime review-loop continuation
-- `4d79f72` — persistent Codex reviewer sessions
+- `a3bb1f0` — tier 1+ unify on realtime worker path
+- `a7dae98` — pass worktree sync mode to realtime pull
+- `d88ad59` — keep sync-back uncommitted in local worktree
+- `34d7abb` — absorb Hetzner sync history safely
 
 ---
 
@@ -36,18 +36,18 @@ Recent implementation commits:
 | Tier | When used | Worker | Reviewer |
 |------|-----------|--------|----------|
 | **0** | tiny/local-safe edits | caller agent direct | none |
-| **1** | normal coding tasks | harness worker session | Codex ACP |
-| **2** | complex / high-risk / multi-step coding | `claude-realtime.sh` on Hetzner | caller-agent plan review + Codex ACP |
+| **1** | normal coding tasks | `claude-realtime.sh` on Hetzner | Codex CLI |
+| **2** | complex / high-risk / multi-step coding | same realtime worker path | caller-agent plan review + Codex CLI |
 
 ### Tier 1
-- worker runs through the harness worker path
+- worker runs through `claude-realtime.sh`
 - review loop can request fixes
-- Codex ACP reviewer session is persisted per plan/task
+- follow-up fixes continue in the **same Claude session** via realtime `jobId` + `session_id`
 
 ### Tier 2
-- worker runs through `claude-realtime.sh` on Hetzner
+- worker runs through the same `claude-realtime.sh` path as Tier 1
 - plan review is produced by the **calling agent directly** (embedded runtime path)
-- repo is synced back before Codex ACP review
+- repo is synced back before Codex CLI review
 - realtime follow-up fixes continue in the same worker session
 
 ---
@@ -76,10 +76,10 @@ Useful parameters:
 - `approved_plan_id`
 
 Typical flow:
-1. router classifies complexity
-2. planner builds task list
-3. worker executes
-4. reviewer checks gaps
+1. deterministic router classifies complexity
+2. deterministic planner builds task list
+3. realtime worker executes for tier 1+
+4. Codex CLI reviewer checks gaps
 5. fix loop runs if needed
 6. structured result returned
 

@@ -28,11 +28,12 @@ request
 ### Core stages
 
 1. **Router** (`src/router.ts`)
-   - classifies into tier 0 / 1 / 2
+   - deterministically classifies into tier 0 / 1 / 2
    - simple single-feature workflows are biased toward fewer task splits
 
 2. **Planner** (`src/planner.ts`)
-   - decomposes into tasks
+   - deterministic task decomposition only
+   - no model call happens here
    - collapses common “implement + test + README + verify + commit” requests into one task when appropriate
 
 3. **Worker execution** (`src/tools/harness-execute.ts`)

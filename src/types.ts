@@ -101,11 +101,12 @@ export interface PluginConfig {
   operationMode: OperationMode;
   maxReviewLoops: number;
   reviewModel?: string;
-  workerModel?: string;
-  memoryV3Endpoint?: string;
-  routerMaxTokens: number;
-  plannerMaxTokens: number;
-  reviewerMaxTokens: number;
+  realtimeModel?: string;
+  workerModel?: string;      // legacy fallback alias for realtimeModel
+  memoryV3Endpoint?: string; // deprecated no-op (planner no longer queries Memory V3)
+  routerMaxTokens: number;   // deprecated no-op
+  plannerMaxTokens: number;  // deprecated no-op
+  reviewerMaxTokens: number; // deprecated no-op
   enableLegacyTools: boolean;
 }
 

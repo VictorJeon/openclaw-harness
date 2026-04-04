@@ -7,8 +7,8 @@
 `harness_execute` is the **primary coding tool**.
 
 It runs the harness pipeline:
-1. classify request
-2. plan tasks
+1. deterministically classify request
+2. deterministically plan tasks
 3. dispatch worker
 4. review output
 5. run fix loop if needed
