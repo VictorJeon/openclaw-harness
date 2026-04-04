@@ -59,16 +59,14 @@ openclaw-harness/
 ## Current implementation notes
 
 ### Tier 1
-- harness worker path
-- Codex ACP review
-- persistent named reviewer sessions per plan/task
-- review/fix/re-review continuity validated
+- `claude-realtime.sh` worker on Hetzner
+- Codex CLI review
+- realtime follow-up fixes continue in same worker session
 
 ### Tier 2
-- `claude-realtime.sh` worker on Hetzner
+- same `claude-realtime.sh` worker path as Tier 1
 - embedded caller-agent plan review
 - local sync-back before Codex review
-- realtime follow-up fixes continue in same worker session
 - completed realtime worker results recover on resume
 
 ### Planner behavior
@@ -101,8 +99,8 @@ When changing harness behavior, prefer direct proof over inference:
 - do at least one fresh smoke for the changed path
 
 Typical smoke patterns:
-- **tier 1**: small repo + CLAUDE.md rule that should trigger at least one review fix
-- **tier 2**: realtime repo + same-session follow-up + final Codex review
+- **tier 1**: small repo + realtime worker launch + Codex review + one follow-up fix
+- **tier 2**: realtime repo + embedded plan review + same-session follow-up + final Codex review
 
 ---
 

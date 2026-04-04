@@ -73,7 +73,8 @@ For new automated coding work, prefer `harness_execute`.
 
 ## Important behavior notes
 
-- tier 1 uses harness worker + Codex ACP review
-- tier 2 uses realtime Claude worker + embedded caller-agent plan review + Codex ACP review
+- tier 1: `claude-realtime.sh` worker + Codex CLI review
+- tier 2: same realtime worker path + embedded caller-agent plan review + Codex CLI review
+- fix loops for coding tasks continue through the realtime worker path
 - fix loops are automatic until pass or escalation
 - legacy launch safety rules are documented separately in `docs/safety.md`

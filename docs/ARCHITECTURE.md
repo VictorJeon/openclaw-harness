@@ -37,8 +37,8 @@ request
 
 3. **Worker execution** (`src/tools/harness-execute.ts`)
    - tier 0: caller agent direct
-   - tier 1: harness worker session
-   - tier 2: `claude-realtime.sh` on Hetzner
+   - tier 1: `claude-realtime.sh` on Hetzner (default coding worker)
+   - tier 2: the same realtime worker path, with tier-2 planning / decomposition semantics
 
 4. **Review loop** (`src/review-loop.ts` + `src/tools/harness-execute.ts`)
    - reviewer checks worker output
@@ -57,20 +57,20 @@ request
 | Tier | Worker path | Review path |
 |------|-------------|-------------|
 | **0** | caller agent direct | none |
-| **1** | harness worker | Codex ACP reviewer |
-| **2** | realtime Claude worker on Hetzner | embedded caller-agent plan review + Codex ACP reviewer |
+| **1** | realtime Claude worker on Hetzner | Codex CLI reviewer |
+| **2** | realtime Claude worker on Hetzner | embedded caller-agent plan review + Codex CLI reviewer |
 
 ### Tier 1 details
 
 - used for normal coding tasks
-- worker stays continuous across fix loops
-- reviewer uses a **persistent named Codex ACP session** per plan/task
-- validated in fresh smoke with multiple review loops
+- worker runs through `claude-realtime.sh`
+- fix loops continue in the same realtime worker session
+- reviewer runs through Codex CLI
 
 ### Tier 2 details
 
 - used for complex/high-risk/multi-step coding tasks
-- worker runs through `claude-realtime.sh`
+- worker runs through the same `claude-realtime.sh` path as Tier 1
 - plan review is produced by the **calling agent directly** through embedded runtime review
 - feedback is written back to the realtime worker state dir
 - on completion or review-ready checkpoint, repo is synced back locally before review
@@ -88,7 +88,7 @@ harness_execute
   → feedback written into realtime state dir
   → worker continues
   → sync repo back locally
-  → Codex ACP review
+  → Codex CLI review
   → if fix needed, feed back into same realtime worker session
   → final DONE
 ```
@@ -109,8 +109,7 @@ Key implementation points:
 - stored in realtime state artifacts (`plan-review-round-*.source.txt`, etc.)
 
 ### Final / loop review
-- uses **Codex ACP**
-- named reviewer session persists per plan/task
+- uses **Codex CLI**
 - review output is parsed into `pass` / `fix` / escalation
 
 ---

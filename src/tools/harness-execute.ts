@@ -17,6 +17,7 @@ import {
 } from "../checkpoint";
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
+import { resolveReviewerExecutionTarget, runReviewerWithCodexCli } from "../reviewer-runner";
 import type {
   OpenClawPluginToolContext,
   HarnessPlan,
@@ -34,12 +35,22 @@ import type {
  *   1. Router classifies request → tier 0/1/2
  *   2. Approval gate (mode-dependent)
  *   3. Planner decomposes into tasks
- *   4. Dispatcher spawns single-turn Worker sessions
+ *   4. Dispatcher routes worker to realtime Claude worker (claude-realtime.sh)
+ *      for all coding work (tier 1+). Tier 0 stays direct execution.
  *   5. Waits for Worker completion → extracts WorkerResult
- *   6. Spawns Reviewer session (cross-model) → parses ReviewResult
- *   7. Review loop: fix → rereview (max N cycles)
+ *   6. Spawns Reviewer session (Codex CLI) → parses ReviewResult
+ *   7. Review loop: fix via realtime worker → rereview (max N cycles)
  *   8. Checkpoint updated at each step
  *   9. Returns structured result or escalation
+ *
+ * Worker runtime model (2026-04-04 unification):
+ *   - Tier 0: caller agent direct execution
+ *   - Tier 1+: claude-realtime.sh / shared realtime runtime on Hetzner
+ *   - Reviewer: Codex CLI (unchanged)
+ *   - The Claude SDK session worker path (subagent.run / sessionManager.spawn)
+ *     is no longer used for primary coding tasks.
+ *   - workerModel config is preserved for legacy compatibility but ignored
+ *     for realtime-worker execution (realtime model is resolved separately).
  */
 export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
   return {
@@ -384,26 +395,17 @@ async function executeTask(
   ctx: OpenClawPluginToolContext,
   checkpoint: CheckpointData,
 ): Promise<TaskExecutionResult> {
+  // workerModel is preserved in config for legacy compatibility but is ignored
+  // for realtime-worker execution. The realtime model is resolved via resolveRealtimeModel().
   const workerModel = pluginConfig.workerModel ?? "claude";
   const reviewModel = pluginConfig.reviewModel ?? "codex";
-  const resolvedWorkerSubagentModel = resolveSubagentProviderAndModel(workerModel, {
-    provider: "anthropic",
-    model: "claude-sonnet-4-6",
-  });
-  const resolvedReviewerSubagentModel = resolveSubagentProviderAndModel(reviewModel, {
-    provider: "openai-codex",
-    model: "gpt-5.4",
-  });
-  const isTier2Realtime = plan.tier === 2;
-  const runtime = getPluginRuntime();
-  const useSubagent = runtime?.subagent?.run != null;
-  const agentId = ctx.agentId ?? "main";
-  const workerSubagentSessionKey = !isTier2Realtime && useSubagent
-    ? buildHarnessSubagentSessionKey(agentId, plan.id, task.id, "worker")
-    : undefined;
-  let reviewerSubagentSessionKey = useSubagent
-    ? buildHarnessSubagentSessionKey(agentId, plan.id, task.id, "reviewer")
-    : undefined;
+  // 2026-04-04 unification: all coding work (tier 1+) routes through the realtime worker.
+  // The Claude SDK subagent / sessionManager worker paths are deprecated for coding tasks.
+  const useRealtimeWorker = plan.tier >= 1;
+  const reviewerTarget = resolveReviewerExecutionTarget(
+    reviewModel,
+    pluginConfig.defaultModel,
+  );
 
   // Budget: split across phases with a remaining counter
   // Initial worker gets 50%. Remaining 50% covers:
@@ -425,7 +427,8 @@ async function executeTask(
     const workerPrompt = buildWorkerPrompt(task, plan);
     let workerResult: WorkerResult | null = null;
 
-    if (isTier2Realtime) {
+    if (useRealtimeWorker) {
+      // 2026-04-04 unification: all tier 1+ coding work goes through the realtime worker.
       const existingRealtimeJobId = checkpoint.sessions[task.id]?.worker ?? "";
       const recoveredRealtimeResult = existingRealtimeJobId
         ? recoverCompletedRealtimeWorkerResult(task.id, existingRealtimeJobId)
@@ -435,14 +438,14 @@ async function executeTask(
         workerSessionId = existingRealtimeJobId;
         workerResult = recoveredRealtimeResult;
         console.log(
-          `[harness] Recovered completed tier2 worker from checkpoint: task=${task.id}, jobId=${workerSessionId}`,
+          `[harness] Recovered completed realtime worker from checkpoint: task=${task.id}, jobId=${workerSessionId}`,
         );
       } else {
         workerSessionId = existingRealtimeJobId || buildRealtimeJobId(plan.id, task.id);
         // Persist the realtime job id before launch/wait so resume can recover if the tool turn dies
         recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
 
-        const realtimeResult = await executeTier2RealtimeTask(
+        const realtimeResult = await executeRealtimeTask(
           task,
           plan,
           workdir,
@@ -455,7 +458,7 @@ async function executeTask(
           updateTaskStatus(checkpoint, task.id, "failed", workdir, {
             workerResult: realtimeResult.workerResult ?? undefined,
           });
-          const realtimeError = realtimeResult.error ?? `Tier 2 realtime job ${workerSessionId} ended with status=${realtimeResult.status}`;
+          const realtimeError = realtimeResult.error ?? `Realtime job ${workerSessionId} ended with status=${realtimeResult.status}`;
           return {
             taskId: task.id,
             workerSessionId,
@@ -463,46 +466,15 @@ async function executeTask(
             reviewPassed: false,
             reviewLoops: 0,
             escalated: true,
-            error: formatTier2FailureForCaller(ctx, workdir, realtimeError),
+            error: formatRealtimeFailureForCaller(ctx, workdir, realtimeError),
           };
         }
 
         workerResult = realtimeResult.workerResult;
       }
-    } else if (useSubagent) {
-      // === ACP/Subagent path: real cross-model (tier 0/1 only) ===
-      const workerIdempotencyKey = `harness-worker-${plan.id}-${task.id}-${Date.now()}`;
-      const workerRunParams = {
-        idempotencyKey: workerIdempotencyKey,
-        sessionKey: workerSubagentSessionKey,
-        message: [
-          `## Working Directory`,
-          `All file operations MUST use absolute paths under: ${workdir}`,
-          `Create the directory first if it doesn't exist: mkdir -p ${workdir}`,
-          ``,
-          workerPrompt,
-        ].join("\n"),
-        provider: resolvedWorkerSubagentModel.provider,
-        model: resolvedWorkerSubagentModel.model,
-        deliver: false,
-      };
-      console.log(`[harness] Worker subagent.run params: ${JSON.stringify(workerRunParams)}`);
-      const { runId } = await runtime.subagent.run(workerRunParams);
-      workerSessionId = workerSubagentSessionKey ?? "";
-      console.log(`[harness] Worker subagent.run returned runId=${runId}`);
-      const completion = await runtime.subagent.waitForRun({ runId, timeoutMs: 600000 });
-      console.log(`[harness] Worker waitForRun result: status=${completion?.status}, error=${completion?.error}`);
-      if (completion?.status === "error") {
-        throw new Error(`Worker subagent failed: ${completion.error ?? "unknown"}`);
-      }
-      const lastMsg = await getLatestSubagentAssistantText(runtime, workerSessionId, "worker");
-      if (!lastMsg.trim()) {
-        throw new Error(`Worker subagent completed without persisted assistant output: ${workerSessionId}`);
-      }
-      workerResult = parseWorkerOutput(lastMsg, task.id);
     } else {
-      // === Fallback: sessionManager.spawn (CC PTY) ===
-      console.warn(`[harness] Fallback to sessionManager.spawn (no runtime.subagent)`);
+      // === Fallback: sessionManager.spawn (CC PTY) — only reachable for tier 0 edge cases ===
+      console.warn(`[harness] Fallback to sessionManager.spawn (tier 0 / no realtime)`);
       const workerSession = sessionManager!.spawn({
         prompt: workerPrompt,
         name: `harness-${plan.id}-${task.id}`,
@@ -520,7 +492,7 @@ async function executeTask(
 
     recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
     console.log(
-      `[harness] Worker done: task=${task.id}, session=${workerSessionId}, model=${workerModel}, useSubagent=${useSubagent}, tier2Realtime=${isTier2Realtime}`,
+      `[harness] Worker done: task=${task.id}, session=${workerSessionId}, model=${workerModel}, realtimeWorker=${useRealtimeWorker}`,
     );
 
     if (!workerResult) {
@@ -563,55 +535,20 @@ async function executeTask(
 
         let reviewOutput = "";
 
-        if (useSubagent && reviewModel === "codex") {
-          // === Reviewer via Codex ACP (required path for final review) ===
-          console.log(
-            `[harness] Reviewer via Codex ACP: task=${task.id}, loop=${reviewLoop.history.length + 1}`,
-          );
-          const acpReview = await runCodexAcpReview(
-            reviewPrompt,
+        if (reviewerTarget.backend === "codex-cli") {
+          const codexRun = await runReviewerWithCodexCli({
+            prompt: reviewPrompt,
             workdir,
-            plan.id,
-            task.id,
-            reviewLoop.history.length + 1,
-          );
-          reviewerSubagentSessionKey = acpReview.reviewerSessionId;
-          recordSession(checkpoint, task.id, "reviewer", reviewerSubagentSessionKey, workdir);
-          reviewOutput = acpReview.output;
-        } else if (useSubagent) {
-          // === Reviewer via subagent.run — same reviewer session across re-reviews ===
-          const isReviewerContinuation = reviewLoop.history.length > 0 || reviewerRetryCount > 0;
-          const reviewerMessage = isReviewerContinuation
-            ? reviewPrompt
-            : REVIEWER_SYSTEM_PROMPT + "\n\n---\n\n" + reviewPrompt;
-          console.log(
-            `[harness] Reviewer via subagent.run: key=${reviewerSubagentSessionKey}, model=${reviewModel}, continuity=${isReviewerContinuation ? "continue" : "start"}`,
-          );
-          const { runId: reviewRunId } = await runtime.subagent.run({
-            idempotencyKey: `harness-review-${plan.id}-${task.id}-${reviewLoop.history.length + 1}-${Date.now()}`,
-            sessionKey: reviewerSubagentSessionKey,
-            message: reviewerMessage,
-            provider: resolvedReviewerSubagentModel.provider,
-            model: resolvedReviewerSubagentModel.model,
-            deliver: false,
+            model: reviewerTarget.launchModel,
           });
-          recordSession(checkpoint, task.id, "reviewer", reviewerSubagentSessionKey ?? "", workdir);
-          await runtime.subagent.waitForRun({ runId: reviewRunId, timeoutMs: 300000 });
-          reviewOutput = await getLatestSubagentAssistantText(
-            runtime,
-            reviewerSubagentSessionKey ?? "",
-            "reviewer",
-          );
-          if (!reviewOutput.trim()) {
-            throw new Error(`Reviewer subagent completed without persisted assistant output: ${reviewerSubagentSessionKey ?? "unknown"}`);
-          }
+          recordSession(checkpoint, task.id, "reviewer", codexRun.sessionId, workdir);
+          reviewOutput = codexRun.output;
         } else {
-          // === Fallback: sessionManager.spawn ===
           const reviewerSession = sessionManager!.spawn({
             prompt: reviewPrompt,
             name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
             workdir,
-            model: reviewModel,
+            model: reviewerTarget.launchModel ?? reviewModel,
             maxBudgetUsd: reviewBudget,
             systemPrompt: REVIEWER_SYSTEM_PROMPT,
             permissionMode: "default",
@@ -625,7 +562,7 @@ async function executeTask(
         }
 
         console.log(
-          `[harness] Reviewer done: task=${task.id}, loop=${reviewLoop.history.length + 1}, model=${reviewModel}, retry=${reviewerRetryCount}, useSubagent=${useSubagent}`,
+          `[harness] Reviewer done: task=${task.id}, loop=${reviewLoop.history.length + 1}, model=${reviewModel}, retry=${reviewerRetryCount}, backend=${reviewerTarget.backend}`,
         );
 
         reviewResult = parseReviewOutput(reviewOutput, task.id);
@@ -663,8 +600,8 @@ async function executeTask(
       console.log(`[harness] Review result: task=${task.id}, action=${action.action}, gaps=${reviewResult.gaps.length}`);
 
       if (action.action === "pass") {
-        if (isTier2Realtime) {
-          const realtimeFinalize = await finalizeTier2RealtimeTask(
+        if (useRealtimeWorker) {
+          const realtimeFinalize = await finalizeRealtimeTask(
             task,
             plan,
             workdir,
@@ -689,7 +626,7 @@ async function executeTask(
               reviewPassed: false,
               reviewLoops: reviewLoop.history.length,
               escalated: true,
-              error: formatTier2FailureForCaller(ctx, workdir, realtimeError),
+              error: formatRealtimeFailureForCaller(ctx, workdir, realtimeError),
             };
           }
         }
@@ -727,10 +664,10 @@ async function executeTask(
         };
       }
 
-      // action === "fix": spawn a fixer session with gap feedback
+      // action === "fix": feed gap feedback back into the same realtime worker
       if (action.action === "fix") {
-        if (isTier2Realtime) {
-          const realtimeFollowUp = await continueTier2RealtimeTask(
+        if (useRealtimeWorker) {
+          const realtimeFollowUp = await continueRealtimeTask(
             task,
             plan,
             workdir,
@@ -746,7 +683,7 @@ async function executeTask(
               reviewResult,
               workerResult: realtimeFollowUp.workerResult ?? currentWorkerResult,
             });
-            const realtimeError = realtimeFollowUp.error ?? `Tier 2 realtime follow-up ended with status=${realtimeFollowUp.status}`;
+            const realtimeError = realtimeFollowUp.error ?? `Realtime follow-up ended with status=${realtimeFollowUp.status}`;
             return {
               taskId: task.id,
               workerSessionId,
@@ -755,7 +692,7 @@ async function executeTask(
               reviewLoops: reviewLoop.history.length,
               escalated: true,
               escalationReason: formatEscalation(plan, reviewLoop, task),
-              error: formatTier2FailureForCaller(ctx, workdir, realtimeError),
+              error: formatRealtimeFailureForCaller(ctx, workdir, realtimeError),
             };
           }
 
@@ -769,49 +706,24 @@ async function executeTask(
           continue;
         }
 
+        // Fallback fix path (tier 0 edge case only — should not normally be reached)
+        console.warn(`[harness] Fix fallback via sessionManager.spawn: task=${task.id}, loop=${reviewLoop.currentLoop}`);
         const fixBudget = Math.min(perPhaseBudget, remainingBudget);
         remainingBudget -= fixBudget;
-
-        if (useSubagent) {
-          // === Fixer via subagent.run — same worker session across fix loops ===
-          console.log(
-            `[harness] Fixer via subagent.run: key=${workerSessionId}, model=${workerModel}, continuity=continue`,
-          );
-          const { runId: fixRunId } = await runtime.subagent.run({
-            idempotencyKey: `harness-fix-${plan.id}-${task.id}-${reviewLoop.currentLoop}-${Date.now()}`,
-            sessionKey: workerSessionId,
-            message: `## Working Directory\nAll file operations MUST use absolute paths under: ${workdir}\nCreate the directory first if it doesn't exist: mkdir -p ${workdir}\n\n${action.fixPrompt}`,
-            provider: workerModel === "codex" ? "openai-codex" : "anthropic",
-            model: workerModel === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
-            deliver: false,
-          });
-          await runtime.subagent.waitForRun({ runId: fixRunId, timeoutMs: 600000 });
-          const fixText = await getLatestSubagentAssistantText(runtime, workerSessionId, "worker");
-          const fixResult = parseWorkerOutput(fixText, task.id);
-          if (fixResult) {
-            currentWorkerResult = fixResult;
-          }
-        } else {
-          const fixSession = sessionManager!.spawn({
-            prompt: action.fixPrompt,
-            name: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
-            workdir,
-            model: workerModel,
-            maxBudgetUsd: fixBudget,
-            permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
-            originChannel: ctx.messageChannel,
-            originAgentId: ctx.agentId,
-            multiTurn: false,
-          });
-
-          console.log(
-            `[harness] Fixer spawned (fallback): task=${task.id}, session=${fixSession.id}, loop=${reviewLoop.currentLoop}, model=${workerModel}`,
-          );
-
-          const fixResult = await waitForCompletion(fixSession.id, task.id);
-          if (fixResult) {
-            currentWorkerResult = fixResult;
-          }
+        const fixSession = sessionManager!.spawn({
+          prompt: action.fixPrompt,
+          name: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
+          workdir,
+          model: workerModel,
+          maxBudgetUsd: fixBudget,
+          permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
+          originChannel: ctx.messageChannel,
+          originAgentId: ctx.agentId,
+          multiTurn: false,
+        });
+        const fixResult = await waitForCompletion(fixSession.id, task.id);
+        if (fixResult) {
+          currentWorkerResult = fixResult;
         }
         // Continue loop → next review iteration
       }
@@ -837,8 +749,8 @@ async function executeTask(
       reviewPassed: false,
       reviewLoops: 0,
       escalated: true,
-      error: isTier2Realtime
-        ? formatTier2FailureForCaller(ctx, workdir, detailedError)
+      error: useRealtimeWorker
+        ? formatRealtimeFailureForCaller(ctx, workdir, detailedError)
         : detailedError,
     };
   } finally {
@@ -858,7 +770,7 @@ interface SessionCompletion {
   error?: string;
 }
 
-async function executeTier2RealtimeTask(
+async function executeRealtimeTask(
   task: TaskSpec,
   plan: HarnessPlan,
   workdir: string,
@@ -872,14 +784,14 @@ async function executeTier2RealtimeTask(
   const notifyAgent = resolveRealtimeNotifyAgent(ctx, resolvedWorkdir);
 
   console.log(
-    `[harness] Tier 2 worker invoking claude-realtime.sh: script=${REALTIME_SCRIPT_PATH}, jobId=${jobId}, workdir=${resolvedWorkdir}, model=${realtimeModel}, notifyAgent=${notifyAgent}`,
+    `[harness] Realtime worker invoking claude-realtime.sh: script=${REALTIME_SCRIPT_PATH}, jobId=${jobId}, workdir=${resolvedWorkdir}, model=${realtimeModel}, notifyAgent=${notifyAgent}`,
   );
 
   const launch = await launchRealtimeJob(spec, resolvedWorkdir, jobId, realtimeModel, notifyAgent);
-  return await waitForTier2RealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, launch.jobId, launch.stateDir, "round-complete");
+  return await waitForRealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, launch.jobId, launch.stateDir, "round-complete");
 }
 
-async function continueTier2RealtimeTask(
+async function continueRealtimeTask(
   task: TaskSpec,
   plan: HarnessPlan,
   workdir: string,
@@ -891,10 +803,10 @@ async function continueTier2RealtimeTask(
   const stateDir = join(REALTIME_STATE_ROOT, jobId);
   await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, feedback);
   console.log(`[harness] Tier 2 follow-up feedback sent: jobId=${jobId}`);
-  return await waitForTier2RealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, jobId, stateDir, "round-complete");
+  return await waitForRealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, jobId, stateDir, "round-complete");
 }
 
-async function finalizeTier2RealtimeTask(
+async function finalizeRealtimeTask(
   task: TaskSpec,
   plan: HarnessPlan,
   workdir: string,
@@ -908,10 +820,10 @@ async function finalizeTier2RealtimeTask(
     await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, "DONE");
     console.log(`[harness] Tier 2 final DONE sent: jobId=${jobId}, previousStatus=${currentStatus ?? "missing"}`);
   }
-  return await waitForTier2RealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, jobId, stateDir, "terminal");
+  return await waitForRealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, jobId, stateDir, "terminal");
 }
 
-async function waitForTier2RealtimeCheckpoint(
+async function waitForRealtimeCheckpoint(
   task: TaskSpec,
   plan: HarnessPlan,
   workdir: string,
@@ -989,7 +901,7 @@ async function launchRealtimeJob(
   }
 
   console.log(
-    `[harness] Tier 2 worker launched: jobId=${jobId}, stateDir=${stateDir}, output=${combinedOutput || "(empty)"}`,
+    `[harness] Realtime worker launched: jobId=${jobId}, stateDir=${stateDir}, output=${combinedOutput || "(empty)"}`,
   );
 
   return {
@@ -1720,7 +1632,7 @@ function resolveRealtimeNotifyAgent(ctx: OpenClawPluginToolContext, workdir: str
     || resolveCallerAgentId(ctx);
 }
 
-function formatTier2FailureForCaller(
+function formatRealtimeFailureForCaller(
   ctx: OpenClawPluginToolContext,
   workdir: string,
   detailedError: string,
