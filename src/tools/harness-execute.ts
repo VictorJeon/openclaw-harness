@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { isAbsolute, normalize, relative, resolve } from "node:path";
 import { sessionManager, pluginConfig } from "../shared";
 import { classifyRequest } from "../router";
 import { buildPlan, buildModelPlan, searchMemory } from "../planner";
@@ -360,7 +361,7 @@ async function executeTask(
     console.log(`[harness] Worker spawned: task=${task.id}, session=${workerSession.id}, model=${workerModel}`);
 
     // Wait for worker to complete
-    const workerResult = await waitForCompletion(workerSession.id, task.id);
+    const workerResult = await waitForCompletion(workerSession.id, task.id, workdir);
 
     if (!workerResult) {
       updateTaskStatus(checkpoint, task.id, "failed", workdir);
@@ -488,7 +489,7 @@ async function executeTask(
 
         console.log(`[harness] Fixer spawned: task=${task.id}, session=${fixSession.id}, loop=${reviewLoop.currentLoop}`);
 
-        const fixResult = await waitForCompletion(fixSession.id, task.id);
+        const fixResult = await waitForCompletion(fixSession.id, task.id, workdir);
         if (fixResult) {
           currentWorkerResult = fixResult;
         }
@@ -632,7 +633,7 @@ async function waitForSessionEnd(sessionId: string): Promise<SessionCompletion> 
  * than silently returning null — this preserves the "completed" signal
  * and avoids treating empty output as total failure.
  */
-async function waitForCompletion(sessionId: string, taskId: string): Promise<WorkerResult | null> {
+async function waitForCompletion(sessionId: string, taskId: string, workdir: string): Promise<WorkerResult | null> {
   const completion = await waitForSessionEnd(sessionId);
 
   if (completion.status !== "completed") {
@@ -647,7 +648,7 @@ async function waitForCompletion(sessionId: string, taskId: string): Promise<Wor
         taskId,
         status: "failed",
         summary: completion.output.length > 500 ? completion.output.slice(-500) : completion.output,
-        filesChanged: extractFilePaths(completion.output),
+        filesChanged: extractRelevantFilePaths(completion.output, workdir),
         testsRun: extractTestCount(completion.output),
         warnings: [...extractWarnings(completion.output), "Session timed out — result may be incomplete"],
         sessionId,
@@ -675,7 +676,7 @@ async function waitForCompletion(sessionId: string, taskId: string): Promise<Wor
     taskId,
     status: "completed",
     summary: completion.output.length > 500 ? completion.output.slice(-500) : completion.output,
-    filesChanged: extractFilePaths(completion.output),
+    filesChanged: extractRelevantFilePaths(completion.output, workdir),
     testsRun: extractTestCount(completion.output),
     warnings: extractWarnings(completion.output),
     sessionId,
@@ -723,7 +724,7 @@ function normalizeFileCandidate(raw: string): string | null {
     .replace(/[`'"\])}>:;,]+$/, "")
     .replace(/^\.\//, "");
 
-  if (!candidate || candidate.includes("://") || candidate.includes("@")) {
+  if (!candidate || candidate.includes("://") || candidate.includes("@") || /\s/.test(candidate)) {
     return null;
   }
 
@@ -764,6 +765,30 @@ export function extractFilePaths(output: string): string[] {
   collect(output, backtickPattern);
 
   return [...paths];
+}
+
+function relativizeFilePath(candidate: string, workdir: string): string | null {
+  if (!isAbsolute(candidate)) {
+    return candidate;
+  }
+
+  const normalizedCandidate = normalize(candidate);
+  const normalizedRoot = resolve(workdir);
+  const relativePath = relative(normalizedRoot, normalizedCandidate);
+
+  if (!relativePath || relativePath.startsWith("..")) {
+    return null;
+  }
+
+  return relativePath;
+}
+
+export function extractRelevantFilePaths(output: string, workdir: string): string[] {
+  const normalized = extractFilePaths(output)
+    .map((candidate) => relativizeFilePath(candidate, workdir))
+    .filter((candidate): candidate is string => !!candidate);
+
+  return [...new Set(normalized)];
 }
 
 function extractTestCount(output: string): number {

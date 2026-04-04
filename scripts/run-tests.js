@@ -389,9 +389,11 @@ function testExtractFilePathsCapturesRootAndNestedFiles() {
       "- src/tools/harness-execute.ts",
       "- ./test_calc.py",
       "See also `package.json` and `.env.example`",
+      "Manual verify with `python3 cli.py` and `python cli.py`",
+      "Absolute path reference: `/tmp/project/test_calc.py`",
     ].join("\n");
 
-    const files = harnessExecute.extractFilePaths(output);
+    const files = harnessExecute.extractRelevantFilePaths(output, '/tmp/project');
     assert.deepEqual(files, [
       "calc.py",
       "cli.py",
