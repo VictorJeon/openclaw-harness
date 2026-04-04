@@ -101,12 +101,13 @@ export interface PluginConfig {
   operationMode: OperationMode;
   maxReviewLoops: number;
   reviewModel?: string;
+  plannerModel?: string;
   realtimeModel?: string;
   workerModel?: string;      // legacy fallback alias for realtimeModel
-  memoryV3Endpoint?: string; // deprecated no-op (planner no longer queries Memory V3)
-  routerMaxTokens: number;   // deprecated no-op
-  plannerMaxTokens: number;  // deprecated no-op
-  reviewerMaxTokens: number; // deprecated no-op
+  memoryV3Endpoint?: string;
+  routerMaxTokens: number;
+  plannerMaxTokens: number;
+  reviewerMaxTokens: number;
   enableLegacyTools: boolean;
 }
 
@@ -133,6 +134,13 @@ export interface TaskSpec {
   agent: "codex" | "claude";
 }
 
+export interface PlannerMetadata {
+  backend: "model" | "heuristic";
+  model?: string;
+  fallback: boolean;
+  fallbackReason?: string;
+}
+
 export interface HarnessPlan {
   id: string;
   originalRequest: string;
@@ -140,6 +148,7 @@ export interface HarnessPlan {
   mode: "solo" | "parallel" | "sequential";
   estimatedComplexity: "low" | "medium" | "high";
   tier: Tier;
+  plannerMetadata?: PlannerMetadata;
 }
 
 export interface WorkerResult {

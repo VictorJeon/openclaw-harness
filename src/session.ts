@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SessionConfig, SessionStatus, PermissionMode } from "./types";
 import { pluginConfig } from "./shared";
+import { resolveModelAlias } from "./model-resolution";
 import { nanoid } from "nanoid";
 
 const OUTPUT_BUFFER_MAX = 200;
@@ -139,7 +140,7 @@ export class Session {
     this.name = name;
     this.prompt = config.prompt;
     this.workdir = config.workdir;
-    this.model = config.model;
+    this.model = resolveModelAlias(config.model);
     this.maxBudgetUsd = config.maxBudgetUsd;
     this.systemPrompt = config.systemPrompt;
     this.allowedTools = config.allowedTools;

@@ -6,7 +6,7 @@ import { basename, join, resolve } from "path";
 import { Type } from "@sinclair/typebox";
 import { sessionManager, pluginConfig, getPluginRuntime } from "../shared";
 import { classifyRequest } from "../router";
-import { buildPlan } from "../planner";
+import { buildPlan, buildModelPlan, searchMemory } from "../planner";
 import {
   getPendingTasks,
   initCheckpoint,
@@ -18,6 +18,7 @@ import {
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
 import { resolveReviewerExecutionTarget, runReviewerWithCodexCli } from "../reviewer-runner";
+import { prepareExecutionWorkspace, materializeExecutionWorkspace } from "../workspace-isolation";
 import type {
   OpenClawPluginToolContext,
   HarnessPlan,
@@ -153,12 +154,16 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
             `[harness] Resuming checkpoint ${existingCheckpoint.runId}: skippedCompleted=${runState.skippedCompletedTaskIds.length}, remaining=${runState.resumedTaskIds.length}`,
           );
         }
-        const taskResults = await executePlan(plan, workdir, maxBudgetUsd, ctx, existingCheckpoint);
+        const preparedWorkspace = plan.tier > 0
+          ? prepareExecutionWorkspace(workdir, plan.id)
+          : { originalWorkdir: workdir, executionWorkdir: workdir, isolated: false };
+        const taskResults = await executePlan(plan, preparedWorkspace.executionWorkdir, maxBudgetUsd, ctx, existingCheckpoint);
+        const materialized = plan.tier > 0 ? materializeExecutionWorkspace(preparedWorkspace) : null;
 
         return {
           content: [{
             type: "text",
-            text: formatFinalResult(plan, route, taskResults, mode, existingCheckpoint, runState),
+            text: formatFinalResult(plan, route, taskResults, mode, existingCheckpoint, runState, materialized),
           }],
         };
       }
@@ -170,7 +175,8 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
         (mode === "delegate" && tier === 2);
 
       if (needsApproval) {
-        const plan = buildPlan(params.request, tier > 0 ? tier : 1);
+        const memoryContext = tier > 0 ? await loadPlanningMemory(workdir) : "";
+        const plan = await createExecutionPlan(params.request, tier > 0 ? tier : 1, memoryContext, workdir);
         // Persist the plan so approved_plan_id can load it later
         const checkpoint = initCheckpoint(plan, workdir);
         checkpoint.status = "running"; // mark as awaiting approval
@@ -200,25 +206,47 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
         };
       }
 
+      const memoryContext = await loadPlanningMemory(workdir);
+
       // Step 3: Plan
-      const plan = buildPlan(params.request, tier);
+      const plan = await createExecutionPlan(params.request, tier, memoryContext, workdir);
       console.log(`[harness] Plan: id=${plan.id}, tasks=${plan.tasks.length}, mode=${plan.mode}`);
 
+      const preparedWorkspace = prepareExecutionWorkspace(workdir, plan.id);
+
       // Step 5: Initialize checkpoint
-      const checkpoint = initCheckpoint(plan, workdir);
+      const checkpoint = initCheckpoint(plan, preparedWorkspace.executionWorkdir);
 
       // Step 6: Execute tasks (sequential or parallel based on plan.mode)
-      const taskResults = await executePlan(plan, workdir, maxBudgetUsd, ctx, checkpoint);
+      const taskResults = await executePlan(plan, preparedWorkspace.executionWorkdir, maxBudgetUsd, ctx, checkpoint);
+      const materialized = materializeExecutionWorkspace(preparedWorkspace);
 
       // Step 7: Format final result
       return {
         content: [{
           type: "text",
-          text: formatFinalResult(plan, route, taskResults, mode, checkpoint, freshExecutionRunState()),
+          text: formatFinalResult(plan, route, taskResults, mode, checkpoint, freshExecutionRunState(), materialized),
         }],
       };
     },
   };
+}
+
+async function loadPlanningMemory(workdir: string): Promise<string> {
+  try {
+    return await searchMemory(basename(workdir) || "project");
+  } catch {
+    return "";
+  }
+}
+
+async function createExecutionPlan(
+  request: string,
+  tier: 1 | 2,
+  memoryContext: string,
+  workdir: string,
+): Promise<HarnessPlan> {
+  return await buildModelPlan(request, memoryContext, workdir, undefined, tier);
 }
 
 // --- Orchestration ---
@@ -536,21 +564,9 @@ async function executeTask(
           recordSession(checkpoint, task.id, "reviewer", codexRun.sessionId, workdir);
           reviewOutput = codexRun.output;
         } else {
-          const reviewerSession = sessionManager!.spawn({
-            prompt: reviewPrompt,
-            name: `harness-${plan.id}-${task.id}-review-${reviewLoop.history.length + 1}`,
-            workdir,
-            model: reviewerTarget.launchModel ?? reviewModel,
-            maxBudgetUsd: reviewBudget,
-            systemPrompt: REVIEWER_SYSTEM_PROMPT,
-            permissionMode: "default",
-            allowedTools: ["Read", "Glob", "Grep", "LS"],
-            originChannel: ctx.messageChannel,
-            originAgentId: ctx.agentId,
-            multiTurn: false,
-          });
-          recordSession(checkpoint, task.id, "reviewer", reviewerSession.id, workdir);
-          reviewOutput = await waitForOutput(reviewerSession.id);
+          throw new Error(
+            `Direct-session reviewer fallback is disabled for harness_execute. Configure reviewModel to a Codex-backed target; current backend=${reviewerTarget.backend}.`,
+          );
         }
 
         console.log(
@@ -1048,6 +1064,12 @@ async function waitForRealtimeTerminalState(
     }
 
     if (isRealtimeTerminalStatus(lastStatus)) {
+      const recoveredSuccess = goal === "terminal"
+        ? recoverSuccessfulRealtimeTerminalState(stateDir, lastStatus)
+        : null;
+      if (recoveredSuccess) {
+        return recoveredSuccess;
+      }
       return {
         status: lastStatus,
         ...buildRealtimeSummary(stateDir, lastStatus),
@@ -1055,6 +1077,13 @@ async function waitForRealtimeTerminalState(
     }
 
     await sleep(REALTIME_POLL_INTERVAL_MS);
+  }
+
+  const recoveredSuccess = goal === "terminal"
+    ? recoverSuccessfulRealtimeTerminalState(stateDir, "error:timeout")
+    : null;
+  if (recoveredSuccess) {
+    return recoveredSuccess;
   }
 
   const timeoutStatus = "error:timeout";
@@ -1379,7 +1408,7 @@ function buildRealtimeSummary(
 
 function readLatestRealtimeResult(
   stateDir: string,
-): { sessionId?: string; resultText?: string; numTurns?: number; costUsd?: number } | null {
+): { sessionId?: string; resultText?: string; numTurns?: number; costUsd?: number; subtype?: string; isError?: boolean } | null {
   try {
     if (!existsSync(stateDir)) return null;
 
@@ -1394,10 +1423,35 @@ function readLatestRealtimeResult(
       resultText: typeof latest.result === "string" ? latest.result : undefined,
       numTurns: typeof latest.num_turns === "number" ? latest.num_turns : undefined,
       costUsd: typeof latest.total_cost_usd === "number" ? latest.total_cost_usd : undefined,
+      subtype: typeof latest.subtype === "string" ? latest.subtype : undefined,
+      isError: typeof latest.is_error === "boolean" ? latest.is_error : undefined,
     };
   } catch {
     return null;
   }
+}
+
+function recoverSuccessfulRealtimeTerminalState(
+  stateDir: string,
+  observedStatus: string,
+): { status: string; summary: string; sessionId?: string } | null {
+  const latestResult = readLatestRealtimeResult(stateDir);
+  if (!latestResult?.resultText) return null;
+  if (latestResult.isError === true) return null;
+  if (latestResult.subtype && latestResult.subtype !== "success") return null;
+
+  const feedbackHistory = readTextFileIfExists(join(stateDir, "feedback-history.log")) ?? "";
+  const hasDoneFeedback = /(^|\n)DONE(\n|$)/m.test(feedbackHistory);
+  if (!hasDoneFeedback && observedStatus !== "done") return null;
+
+  return {
+    status: "done",
+    ...buildRealtimeSummary(
+      stateDir,
+      "done",
+      `Recovered terminal success after late ${observedStatus} status override.`,
+    ),
+  };
 }
 
 function isRealtimeReviewReadyStatus(status: string): boolean {
@@ -1858,6 +1912,7 @@ function formatPlanForApproval(
     `**Mode:** ${mode}`,
     `**Plan ID:** ${plan.id}`,
     `**Tasks:** ${plan.tasks.length} (${plan.mode})`,
+    ...formatPlannerMetadata(plan.plannerMetadata),
     ``,
     `### Tasks`,
   ];
@@ -1882,6 +1937,20 @@ function formatPlanForApproval(
   return lines.join("\n");
 }
 
+function formatPlannerMetadata(metadata?: HarnessPlan["plannerMetadata"]): string[] {
+  if (!metadata) return [];
+
+  const lines = [
+    `**Planner:** ${metadata.backend}${metadata.model ? ` | model=${metadata.model}` : ""} | fallback=${metadata.fallback ? "yes" : "no"}`,
+  ];
+
+  if (metadata.fallbackReason) {
+    lines.push(`**Planner fallback:** ${metadata.fallbackReason}`);
+  }
+
+  return lines;
+}
+
 function formatFinalResult(
   plan: HarnessPlan,
   route: ReturnType<typeof classifyRequest>,
@@ -1889,6 +1958,7 @@ function formatFinalResult(
   mode: OperationMode,
   checkpoint: CheckpointData,
   runState: ExecutionRunState,
+  materialized?: { applied: boolean; patchPath?: string; error?: string } | null,
 ): string {
   const passed = results.filter((r) => r.reviewPassed).length;
   const failed = results.filter((r) => !r.reviewPassed).length;
@@ -1904,6 +1974,7 @@ function formatFinalResult(
     `**Run:** ${runState.mode === "resumed" ? "resumed from checkpoint" : "fresh"}`,
     `**Result:** ${passed}/${plan.tasks.length} passed | ${totalLoops} review loops`,
     `**Checkpoint:** ${checkpoint.runId}`,
+    ...formatPlannerMetadata(plan.plannerMetadata),
   ];
 
   if (runState.mode === "resumed") {
@@ -1911,6 +1982,12 @@ function formatFinalResult(
       `**Skipped completed:** ${formatTaskIdList(runState.skippedCompletedTaskIds)}`,
       `**Continued tasks:** ${formatTaskIdList(runState.resumedTaskIds)}`,
     );
+  }
+
+  if (materialized?.error) {
+    lines.push(`**Workspace materialization:** failed`, `**Patch:** ${materialized.patchPath ?? "(none)"}`, `**Reason:** ${materialized.error}`);
+  } else if (materialized?.applied) {
+    lines.push(`**Workspace materialization:** applied${materialized.patchPath ? ` (${materialized.patchPath})` : ""}`);
   }
 
   lines.push(``, `### Task Results`);

@@ -79,7 +79,11 @@
       },
       "reviewModel": {
         "type": "string",
-        "description": "Model for Codex-side review. Should differ from the realtime worker model for blind-spot detection."
+        "description": "Model for Codex-side review. Should differ from the worker/planner model for blind-spot detection."
+      },
+      "plannerModel": {
+        "type": "string",
+        "description": "Preferred model selector for the internal model-backed planner. Defaults to Opus with Sonnet fallback."
       },
       "realtimeModel": {
         "type": "string",
@@ -91,27 +95,27 @@
       },
       "memoryV3Endpoint": {
         "type": "string",
-        "description": "Deprecated no-op. Planner is deterministic and no longer queries Memory V3."
+        "description": "Optional Memory V3 search endpoint used to enrich planner context."
       },
       "routerMaxTokens": {
         "type": "number",
         "default": 500,
-        "description": "Deprecated no-op. Router classification is now deterministic."
+        "description": "Legacy compatibility field. Router classification is deterministic."
       },
       "plannerMaxTokens": {
         "type": "number",
         "default": 2000,
-        "description": "Deprecated no-op. Planner no longer performs model calls."
+        "description": "Legacy compatibility field. Planner output limits are managed by the model runner."
       },
       "reviewerMaxTokens": {
         "type": "number",
         "default": 1000,
-        "description": "Deprecated no-op. Reviewer token caps are not currently enforced here."
+        "description": "Legacy compatibility field for reviewer output sizing."
       },
       "enableLegacyTools": {
         "type": "boolean",
-        "default": true,
-        "description": "Enable the legacy direct-session surface. When false, legacy tools and /harness* commands remain registered but refuse execution and direct users to harness_execute. Leave true (default) to preserve the current behavior."
+        "default": false,
+        "description": "Expose legacy direct-session tools like harness_launch / harness_fg / harness_respond only when explicitly enabled."
       }
     }
   }

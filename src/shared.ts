@@ -21,7 +21,7 @@ export let pluginConfig: PluginConfig = {
   routerMaxTokens: 500,
   plannerMaxTokens: 2000,
   reviewerMaxTokens: 1000,
-  enableLegacyTools: true,
+  enableLegacyTools: false,
 };
 
 export function setPluginConfig(config: Partial<PluginConfig>): void {
@@ -56,13 +56,14 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     operationMode: (config as any).operationMode ?? "delegate",
     maxReviewLoops: (config as any).maxReviewLoops ?? 4,
     reviewModel: (config as any).reviewModel,
+    plannerModel: (config as any).plannerModel,
     realtimeModel: (config as any).realtimeModel,
     workerModel: (config as any).workerModel,
     memoryV3Endpoint: (config as any).memoryV3Endpoint,
     routerMaxTokens: (config as any).routerMaxTokens ?? 500,
     plannerMaxTokens: (config as any).plannerMaxTokens ?? 2000,
     reviewerMaxTokens: (config as any).reviewerMaxTokens ?? 1000,
-    enableLegacyTools: config.enableLegacyTools ?? true,
+    enableLegacyTools: config.enableLegacyTools ?? false,
   };
 }
 
