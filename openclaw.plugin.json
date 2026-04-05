@@ -63,7 +63,7 @@
       "enableLegacyTools": {
         "type": "boolean",
         "default": false,
-        "description": "Enable legacy harness tool surfaces for backward compatibility."
+        "description": "Expose legacy direct-session tools like harness_launch / harness_fg / harness_respond only when explicitly enabled."
       },
       "skipSafetyChecks": {
         "type": "boolean",
@@ -73,7 +73,11 @@
       "operationMode": {
         "type": "string",
         "default": "delegate",
-        "enum": ["ask", "delegate", "autonomous"],
+        "enum": [
+          "ask",
+          "delegate",
+          "autonomous"
+        ],
         "description": "Harness operation mode. ask=all approvals, delegate=auto safe ops, autonomous=fully auto"
       },
       "maxReviewLoops": {
@@ -88,7 +92,7 @@
       },
       "plannerModel": {
         "type": "string",
-        "description": "Preferred model selector for the internal model-backed planner. Defaults to Opus with Sonnet fallback."
+        "description": "Primary model for internal tier-2 planning (defaults to opus, then falls back to sonnet)."
       },
       "realtimeModel": {
         "type": "string",
@@ -98,9 +102,14 @@
         "type": "string",
         "description": "Legacy fallback alias for realtimeModel. Still honored for compatibility."
       },
-      "plannerModel": {
+      "workerBackend": {
         "type": "string",
-        "description": "Primary model for internal tier-2 planning (defaults to opus, then falls back to sonnet)."
+        "default": "remote-realtime",
+        "enum": [
+          "remote-realtime",
+          "local-cc"
+        ],
+        "description": "Worker backend lane selector. Phase 1 keeps remote-realtime as the default stable lane."
       },
       "memoryV3Endpoint": {
         "type": "string",
@@ -120,11 +129,6 @@
         "type": "number",
         "default": 1000,
         "description": "Legacy compatibility field for reviewer output sizing."
-      },
-      "enableLegacyTools": {
-        "type": "boolean",
-        "default": false,
-        "description": "Expose legacy direct-session tools like harness_launch / harness_fg / harness_respond only when explicitly enabled."
       }
     }
   }

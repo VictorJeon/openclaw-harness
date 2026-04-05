@@ -22,6 +22,8 @@ export type SessionStatus = "starting" | "running" | "completed" | "failed" | "k
 
 export type PermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
 
+export type WorkerBackend = "remote-realtime" | "local-cc";
+
 export interface SessionConfig {
   prompt: string;
   workdir: string;
@@ -105,6 +107,7 @@ export interface PluginConfig {
   plannerModel?: string;
   realtimeModel?: string;
   workerModel?: string;      // legacy fallback alias for realtimeModel
+  workerBackend: WorkerBackend;
   memoryV3Endpoint?: string;
   routerMaxTokens: number;
   plannerMaxTokens: number;
