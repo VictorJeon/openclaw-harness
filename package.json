@@ -1,6 +1,6 @@
 {
   "name": "openclaw-harness",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
@@ -42,11 +42,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/VictorJeon/openclaw-harness-private.git"
+    "url": "git+https://github.com/VictorJeon/openclaw-harness.git"
   },
-  "homepage": "https://github.com/VictorJeon/openclaw-harness-private#readme",
+  "homepage": "https://github.com/VictorJeon/openclaw-harness#readme",
   "bugs": {
-    "url": "https://github.com/VictorJeon/openclaw-harness-private/issues"
+    "url": "https://github.com/VictorJeon/openclaw-harness/issues"
   },
   "license": "MIT",
   "author": "Nova <nova@local>",
