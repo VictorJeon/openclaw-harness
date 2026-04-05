@@ -102,8 +102,9 @@ export interface PluginConfig {
   operationMode: OperationMode;
   maxReviewLoops: number;
   reviewModel?: string;
-  workerModel?: string;
   plannerModel?: string;
+  realtimeModel?: string;
+  workerModel?: string;      // legacy fallback alias for realtimeModel
   memoryV3Endpoint?: string;
   routerMaxTokens: number;
   plannerMaxTokens: number;

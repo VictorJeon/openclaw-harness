@@ -1,12 +1,21 @@
-import { sessionManager, formatSessionListing } from "../shared";
+import {
+  sessionManager,
+  formatSessionListing,
+  isLegacyToolsEnabled,
+  legacyCommandDisabledResult,
+} from "../shared";
 
 export function registerClaudeSessionsCommand(api: any): void {
   api.registerCommand({
     name: "harness_sessions",
-    description: "List all Claude Code sessions",
+    description: "[LEGACY] List all Claude Code sessions (for sessions launched via /harness or harness_launch)",
     acceptsArgs: false,
     requireAuth: true,
     handler: () => {
+      if (!isLegacyToolsEnabled()) {
+        return legacyCommandDisabledResult("harness_sessions");
+      }
+
       if (!sessionManager) {
         return {
           text: "Error: SessionManager not initialized. The claude-code service must be running.",

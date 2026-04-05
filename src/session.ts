@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SessionConfig, SessionStatus, PermissionMode } from "./types";
 import { pluginConfig } from "./shared";
+import { resolveModelAlias } from "./model-resolution";
 import { nanoid } from "nanoid";
 import { resolveModelAlias } from "./model-resolution";
 import { tryRecoverRealtimeSyncConflict } from "./git-sync-recovery";

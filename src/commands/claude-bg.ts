@@ -1,12 +1,21 @@
-import { sessionManager, resolveOriginChannel } from "../shared";
+import {
+  sessionManager,
+  resolveOriginChannel,
+  isLegacyToolsEnabled,
+  legacyCommandDisabledResult,
+} from "../shared";
 
 export function registerClaudeBgCommand(api: any): void {
   api.registerCommand({
     name: "harness_bg",
-    description: "Send the current foreground session back to background",
+    description: "[LEGACY] Send the current foreground session back to background (for sessions launched via /harness or harness_launch)",
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx: any) => {
+      if (!isLegacyToolsEnabled()) {
+        return legacyCommandDisabledResult("harness_bg");
+      }
+
       if (!sessionManager) {
         return {
           text: "Error: SessionManager not initialized. The claude-code service must be running.",

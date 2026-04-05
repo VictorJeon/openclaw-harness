@@ -3,14 +3,14 @@ import type { Tier } from "./types";
 /**
  * Router: classify incoming request complexity into tier 0/1/2.
  *
- * Tier 0: Config/docs/simple patches — OpenClaw agent handles directly
- * Tier 1: Simple-to-medium coding — ACP Worker + Review loop
- * Tier 2: Complex/multi-task — Plan → Approve → Worker + Review loop
+ * Tier 0: Config/docs/simple patches — caller agent handles directly
+ * Tier 1: Simple-to-medium coding — realtime worker + review loop
+ * Tier 2: Complex/multi-task — richer decomposition + plan review + same realtime worker path
  *
- * Classification: 3-layer cascade (Citadel-inspired)
- *   1. Pattern match (0 tokens): regex for config/doc changes → tier 0
- *   2. Keyword (~0 tokens): "refactoring", "new feature", "bug fix" → tier 1
- *   3. LLM classification (~500 tokens): ambiguous → tier 2
+ * Classification is deterministic:
+ *   1. Pattern match: regex for config/doc changes → tier 0
+ *   2. Keyword scoring: bug / feature / migration signals → tier 1 or 2
+ *   3. Fallback heuristics: ambiguous length / task-count rules
  */
 
 // Tier 0 patterns: settings, docs, trivial patches
@@ -23,19 +23,35 @@ const TIER0_PATTERNS = [
   /\b\.env\b.*\b(수정|추가)\b/i,
   /\btsconfig\b/i,
   /\b(단순|간단)\s*(패치|수정)\b/i,
+  // Agent/workspace files
+  /\b(AGENTS|MEMORY|SOUL|USER|TOOLS|IDENTITY|HEARTBEAT|BOOTSTRAP)\.md\b/i,
+  // Simple line edits
+  /\b(한 줄|한줄|one line|1줄)\s*(추가|수정|삭제|변경)/i,
+  /\b(주석|코멘트|comment)\s*(추가|수정|삭제)/i,
+  // Plist / LaunchAgent config
+  /\b(plist|LaunchAgent)\b.*\b(수정|추가|변경)/i,
+  // Shell script config changes
+  /\b(\.sh|\.toml|\.yaml|\.yml)\b.*\b(수정|변경|업데이트)/i,
+  // Import/export tweaks
+  /\b(import|export)\s*(추가|수정|삭제)/i,
+  // Simple rename/move
+  /\b(이름|name)\s*(변경|바꿔|rename)/i,
 ];
 
 // Tier 1 keywords: straightforward coding tasks
+// Note: avoid overly generic words like "수정" or "추가해" alone — those overlap with tier 0
 const TIER1_KEYWORDS = [
-  "버그", "bug", "fix", "고쳐", "수정",
-  "새 기능", "new feature", "기능 추가", "추가해",
+  "버그", "bug", "fix", "고쳐",
+  "새 기능", "new feature", "기능 추가", "기능을 추가",
   "리팩토링", "refactor",
   "테스트", "test", "spec",
   "엔드포인트", "endpoint", "api",
   "컴포넌트", "component",
-  "함수", "function",
+  "함수", "function", "만들어",
   "스타일", "css", "style",
   "유효성", "validation",
+  "클래스", "class",
+  "구현", "implement",
 ];
 
 // Tier 2 keywords: complex, multi-part tasks
@@ -52,7 +68,7 @@ const TIER2_KEYWORDS = [
 
 export interface RouteResult {
   tier: Tier;
-  confidence: "pattern" | "keyword" | "llm";
+  confidence: "pattern" | "keyword" | "fallback";
   reason: string;
 }
 
@@ -68,6 +84,14 @@ export function classifyRequest(request: string): RouteResult {
         reason: `Pattern match: ${pattern.source}`,
       };
     }
+  }
+
+  if (isLikelySingleFeatureWorkflow(request)) {
+    return {
+      tier: 1,
+      confidence: "keyword",
+      reason: "Single-feature workflow detected (implementation + test/docs/verify grouped as one task)",
+    };
   }
 
   // Layer 2: Keyword scoring
@@ -116,20 +140,20 @@ export function classifyRequest(request: string): RouteResult {
     };
   }
 
-  // Layer 3: Ambiguous — no keywords, no multi-task signals
+  // Layer 3: Fallback heuristics for ambiguous requests
   // Long requests or complex phrasing → tier 2, else default tier 1
   if (normalized.length > 200) {
     return {
       tier: 2,
-      confidence: "llm",
-      reason: `Long ambiguous request (${normalized.length} chars), needs LLM classification`,
+      confidence: "fallback",
+      reason: `Long ambiguous request (${normalized.length} chars), fallback heuristics chose tier 2`,
     };
   }
 
   return {
     tier: 1,
-    confidence: "llm",
-    reason: "No strong signals — default tier 1, LLM classification recommended",
+    confidence: "fallback",
+    reason: "No strong signals — fallback heuristics defaulted to tier 1",
   };
 }
 
@@ -138,6 +162,10 @@ export function classifyRequest(request: string): RouteResult {
  * Looks for numbered lists, commas with verbs, "and" conjunctions, etc.
  */
 function countTasks(request: string): number {
+  if (isLikelySingleFeatureWorkflow(request)) {
+    return 1;
+  }
+
   // Count numbered items (1. 2. 3. or 1) 2) 3))
   const numbered = request.match(/(?:^|\n)\s*\d+[.)]/g);
   if (numbered && numbered.length >= 2) return numbered.length;
@@ -155,4 +183,22 @@ function countTasks(request: string): number {
   if (commaSegments.length >= 3) return commaSegments.length;
 
   return 0;
+}
+
+function isLikelySingleFeatureWorkflow(request: string): boolean {
+  const normalized = request.toLowerCase();
+  if (/(migration|migrate|rewrite|architecture|system|integration|infra|multiple files|large scale|마이그레이션|재작성|아키텍처|시스템|통합|인프라|여러 파일|대규모)/i.test(request)) {
+    return false;
+  }
+
+  const explicitFiles = request.match(/[\w\-./]+\.\w{1,5}/g) ?? [];
+  if (explicitFiles.length > 3) {
+    return false;
+  }
+
+  const hasImplementation = /(create|add|update|modify|implement|write|build|make|생성|추가|수정|구현|작성|만들)/i.test(request);
+  const hasSupportSteps = /(readme|pytest|test|verify|validation|commit|usage|example|readable|minimal|simple|문서|테스트|검증|커밋|예시|간단|최소)/i.test(request);
+  const hasMultiAreaSignals = /(backend and frontend|frontend and backend|api and ui|여러 서비스|여러 컴포넌트|서로 다른 모듈)/i.test(normalized);
+
+  return hasImplementation && hasSupportSteps && !hasMultiAreaSignals;
 }

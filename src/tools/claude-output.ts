@@ -1,11 +1,16 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, formatDuration } from "../shared";
+import {
+  sessionManager,
+  formatDuration,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeOutputTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "harness_output",
-    description: "Show recent output from a Claude Code session (by name or ID).",
+    description: "[LEGACY] Show recent output from a Claude Code session (by name or ID). Used for sessions launched via harness_launch. harness_execute returns structured results directly and does not require this tool.",
     parameters: Type.Object({
       session: Type.String({ description: "Session name or ID to get output from" }),
       lines: Type.Optional(
@@ -20,6 +25,10 @@ export function makeClaudeOutputTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_output");
+      }
+
       if (!sessionManager) {
         return {
           content: [

@@ -1,5 +1,12 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, resolveOriginChannel, resolveAgentChannel, hasValidOriginChannel } from "../shared";
+import {
+  sessionManager,
+  resolveOriginChannel,
+  resolveAgentChannel,
+  hasValidOriginChannel,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
@@ -25,7 +32,7 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "harness_bg",
     description:
-      "Send a Claude Code session back to background (stop streaming). If no session specified, detaches whichever session is currently in foreground.",
+      "[LEGACY] Send a Claude Code session back to background (stop streaming). If no session specified, detaches whichever session is currently in foreground. Only applies to sessions launched via harness_launch.",
     parameters: Type.Object({
       session: Type.Optional(
         Type.String({
@@ -35,6 +42,10 @@ export function makeClaudeBgTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_bg");
+      }
+
       if (!sessionManager) {
         return {
           content: [

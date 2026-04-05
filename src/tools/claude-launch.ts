@@ -2,7 +2,14 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { Type } from "@sinclair/typebox";
-import { sessionManager, pluginConfig, resolveAgentChannel, resolveAgentId } from "../shared";
+import {
+  sessionManager,
+  pluginConfig,
+  resolveAgentChannel,
+  resolveAgentId,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
@@ -11,7 +18,7 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
   return {
     name: "harness_launch",
     description:
-      "Launch a Claude Code session in background to execute a development task. Sessions are multi-turn by default — they stay open for follow-up messages via claude_respond. Set multi_turn_disabled: true for fire-and-forget sessions. Supports resuming previous sessions. Returns a session ID and name for tracking.",
+      "[LEGACY] Launch a Claude Code session directly in background. For new coding tasks, prefer harness_execute which adds automatic planning, cross-model review, and structured results. Use harness_launch only for interactive/multi-turn sessions that need direct PTY access. Sessions are multi-turn by default — they stay open for follow-up messages via harness_respond. Set multi_turn_disabled: true for fire-and-forget sessions. Supports resuming previous sessions. Returns a session ID and name for tracking.",
     parameters: Type.Object({
       prompt: Type.String({ description: "The task prompt to execute" }),
       name: Type.Optional(
@@ -73,6 +80,10 @@ export function makeClaudeLaunchTool(ctx: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_launch");
+      }
+
       if (!sessionManager) {
         return {
           content: [

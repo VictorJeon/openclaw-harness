@@ -1,5 +1,11 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, pluginConfig, resolveAgentChannel } from "../shared";
+import {
+  sessionManager,
+  pluginConfig,
+  resolveAgentChannel,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeRespondTool(ctx?: OpenClawPluginToolContext) {
@@ -24,7 +30,7 @@ export function makeClaudeRespondTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "harness_respond",
     description:
-      "Send a follow-up message to a running Claude Code session. The session must be running. Sessions are multi-turn by default, so this works with any session unless it was launched with multi_turn_disabled: true.",
+      "[LEGACY] Send a follow-up message to a running Claude Code session. The session must be running. Sessions are multi-turn by default, so this works with any session unless it was launched with multi_turn_disabled: true. Only applies to sessions launched via harness_launch; harness_execute manages its own review-fix loop internally.",
     parameters: Type.Object({
       session: Type.String({
         description: "Session name or ID to respond to",
@@ -46,6 +52,10 @@ export function makeClaudeRespondTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_respond");
+      }
+
       if (!sessionManager) {
         return {
           content: [

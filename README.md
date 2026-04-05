@@ -1,235 +1,173 @@
-# OpenClaw plugin to orchestrate Claude Code
+# OpenClaw Harness
 
-Orchestrate Claude Code sessions as managed background processes from any OpenClaw channel.
+OpenClaw Harness is the **harness-first coding plugin** for OpenClaw.
 
-Launch, monitor, and interact with multiple Claude Code SDK sessions directly from Telegram, Discord, or any OpenClaw-supported platform — without leaving your chat interface.
+The primary surface is **`harness_execute`**:
+- classify the request
+- choose tier 0 / 1 / 2
+- dispatch the worker
+- run review / fix / re-review loops
+- return a structured result
 
-[![Demo Video](https://img.youtube.com/vi/vbX1Y0Nx4Tc/maxresdefault.jpg)](https://youtube.com/shorts/vbX1Y0Nx4Tc)
-
-*Two parallel Claude Code agents building an X clone and an Instagram clone simultaneously from Telegram.*
+The old direct Claude session tools still exist, but they are the **legacy surface**.
 
 ---
 
-## Quick Start
+## Current verified state (2026-04-04)
 
-### 1. Install the plugin
+Verified in live smoke runs:
+- caller-agent direct **plan review** for tier 2
+- **Codex CLI** final review
+- tier 1+ realtime worker routing confirmed
+- realtime follow-up fixes continue in the **same Claude session** via `--resume`
+- local sync-back materializes as **uncommitted worktree diff** (not merge commits)
+- single-feature workflow collapse still works
+
+Recent implementation commits:
+- `a3bb1f0` — tier 1+ unify on realtime worker path
+- `a7dae98` — pass worktree sync mode to realtime pull
+- `d88ad59` — keep sync-back uncommitted in local worktree
+- `34d7abb` — absorb Hetzner sync history safely
+
+---
+
+## Execution model
+
+| Tier | When used | Worker | Reviewer |
+|------|-----------|--------|----------|
+| **0** | tiny/local-safe edits | caller agent direct | none |
+| **1** | normal coding tasks | `claude-realtime.sh` on Hetzner | Codex CLI |
+| **2** | complex / high-risk / multi-step coding | same realtime worker path | caller-agent plan review + Codex CLI |
+
+### Tier 1
+- worker runs through `claude-realtime.sh`
+- review loop can request fixes
+- follow-up fixes continue in the **same Claude session** via realtime `jobId` + `session_id`
+
+### Tier 2
+- worker runs through the same `claude-realtime.sh` path as Tier 1
+- plan review is produced by the **calling agent directly** (embedded runtime path)
+- repo is synced back before Codex CLI review
+- realtime follow-up fixes continue in the same worker session
+
+---
+
+## Primary tool
+
+### `harness_execute`
+
+Use this for new coding tasks.
+
+Example:
+
+```txt
+harness_execute(
+  request: "Fix the auth refresh bug in src/auth.ts",
+  workdir: "/path/to/repo"
+)
+```
+
+Useful parameters:
+- `request`
+- `workdir`
+- `mode` = `ask` | `delegate` | `autonomous`
+- `tier_override` = `0` | `1` | `2`
+- `max_budget_usd`
+- `approved_plan_id`
+
+Typical flow:
+1. deterministic router classifies complexity
+2. model-backed planner builds the task list (Opus primary, Sonnet fallback)
+3. realtime worker executes for tier 1+
+4. Codex CLI reviewer checks gaps
+5. fix loop runs if needed
+6. structured result returned
+
+---
+
+## Legacy surface
+
+Legacy tools remain for interactive raw session control:
+- `harness_launch`
+- `harness_respond`
+- `harness_fg`
+- `harness_bg`
+- `harness_kill`
+- `harness_output`
+- `harness_sessions`
+- `harness_stats`
+
+These are still useful for:
+- interactive PTY sessions
+- debugging old session flows
+- resuming older direct Claude sessions
+
+For new automated coding tasks, prefer **`harness_execute`**.
+
+---
+
+## Install from GitHub
 
 ```bash
-openclaw plugins install @betrue/openclaw-claude-code-plugin
+git clone https://github.com/VictorJeon/openclaw-harness-private.git ~/.openclaw/extensions/openclaw-harness
+cd ~/.openclaw/extensions/openclaw-harness
+npm install
+npm run build
+```
+
+For stable rollouts, pin to a known-good commit instead of tracking `main` blindly (current recommended pin: `8c82e24`).
+
+Then enable it in `~/.openclaw/openclaw.json`:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "openclaw-harness": {
+        enabled: true,
+        config: {
+          operationMode: "autonomous",
+          plannerModel: "anthropic/claude-opus-4-6",
+          reviewModel: "openai-codex/gpt-5.4",
+          realtimeModel: "anthropic/claude-opus-4-6",
+          enableLegacyTools: false
+        }
+      }
+    }
+  }
+}
+```
+
+After config changes, restart the gateway.
+
+## Local development
+
+```bash
+cd /Users/nova/.openclaw/extensions/openclaw-harness
+npm install
+npm run build
 openclaw gateway restart
 ```
 
-### 2. Configure notifications (minimal)
-
-Add to `~/.openclaw/openclaw.json`:
-
-```jsonc
-{
-  "plugins": {
-    "entries": {
-      "openclaw-claude-code-plugin": {
-        "enabled": true,
-        "config": {
-          "fallbackChannel": "telegram|my-bot|123456789",
-          "maxSessions": 5
-        }
-      }
-    }
-  }
-}
-```
-
-### 3. Launch your first session
-
-Ask your agent: *"Fix the bug in auth.ts"*
-
-On first launch, the plugin runs **4 safety checks** and guides you through one-time setup:
-
-1. **Answer an autonomy question** — tell the agent how much freedom Claude Code gets
-2. **Run a heartbeat config command** — paste the `jq` one-liner the agent provides
-3. **Restart the gateway** — `openclaw gateway restart`
-
-That's it. Future launches skip setup entirely.
-
-> Full first-launch walkthrough: [docs/safety.md](docs/safety.md)
-
----
-
-## Features
-
-- **Multi-session management** — Run multiple concurrent sessions, each with a unique ID and human-readable name
-- **Foreground / background model** — Sessions run in background by default; bring any to foreground to stream output in real time, with catchup of missed output
-- **Real-time notifications** — Get notified on completion, failure, or when Claude asks a question
-- **Multi-turn conversations** — Send follow-up messages, interrupt, or iterate with a running agent
-- **Session resume & fork** — Resume any completed session or fork it into a new conversation branch
-- **4 pre-launch safety checks** — Autonomy skill, heartbeat config, HEARTBEAT.md, and channel mapping
-- **Multi-agent support** — Route notifications to the correct agent/chat via workspace-based channel mapping
-- **Automatic cleanup** — Completed sessions garbage-collected after 1 hour; IDs persist for resume
-
----
-
-## Tools
-
-| Tool | Description |
-|------|-------------|
-| `claude_launch` | Start a new Claude Code session in background |
-| `claude_respond` | Send a follow-up message to a running session |
-| `claude_fg` | Bring a session to foreground — stream output in real time |
-| `claude_bg` | Send a session back to background — stop streaming |
-| `claude_kill` | Terminate a running session |
-| `claude_output` | Read buffered output from a session |
-| `claude_sessions` | List all sessions with status and progress |
-| `claude_stats` | Show usage metrics (counts, durations, costs) |
-
-All tools are also available as **chat commands** (`/claude`, `/claude_fg`, etc.) and most as **gateway RPC methods**.
-
-> Full parameter tables and response schemas: [docs/API.md](docs/API.md)
-
----
-
-## Quick Usage
-
-```bash
-# Launch a session
-/claude Fix the authentication bug in src/auth.ts
-/claude --name fix-auth Fix the authentication bug
-
-# Monitor
-/claude_sessions
-/claude_fg fix-auth
-/claude_bg fix-auth
-
-# Interact
-/claude_respond fix-auth Also add unit tests
-/claude_respond --interrupt fix-auth Stop that and do this instead
-
-# Lifecycle
-/claude_kill fix-auth
-/claude_resume fix-auth Add error handling
-/claude_resume --fork fix-auth Try a different approach
-/claude_stats
-```
-
----
-
-## Notifications
-
-The plugin sends real-time notifications to your chat based on session lifecycle events:
-
-| Emoji | Event | Description |
-|-------|-------|-------------|
-| ↩️ | Launched | Session started successfully |
-| 🔔 | Claude asks | Session is waiting for user input — includes output preview |
-| ↩️ | Responded | Follow-up message delivered to session |
-| ✅ | Completed | Session finished successfully |
-| ❌ | Failed | Session encountered an error |
-| ⛔ | Killed | Session was manually terminated |
-
-Foreground sessions stream full output in real time. Background sessions only send lifecycle notifications.
-
-> Notification architecture and delivery model: [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)
-
----
-
-## Configuration
-
-Set values in `~/.openclaw/openclaw.json` under `plugins.entries["openclaw-claude-code-plugin"].config`.
-
-### Essential parameters
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `agentChannels` | `object` | — | Map workdir paths → notification channels |
-| `fallbackChannel` | `string` | — | Default channel when no workspace match found |
-| `maxSessions` | `number` | `5` | Maximum concurrent sessions |
-| `maxAutoResponds` | `number` | `10` | Max consecutive auto-responds before requiring user input |
-| `defaultBudgetUsd` | `number` | `5` | Default budget per session (USD) |
-| `permissionMode` | `string` | `"bypassPermissions"` | `"default"` / `"plan"` / `"acceptEdits"` / `"bypassPermissions"` |
-| `skipSafetyChecks` | `boolean` | `false` | Skip ALL pre-launch safety guards (autonomy skill, heartbeat, HEARTBEAT.md, agentChannels). For dev/testing only. |
-
-### Example
-
-```jsonc
-{
-  "plugins": {
-    "entries": {
-      "openclaw-claude-code-plugin": {
-        "enabled": true,
-        "config": {
-          "maxSessions": 3,
-          "defaultBudgetUsd": 10,
-          "defaultModel": "sonnet",
-          "permissionMode": "bypassPermissions",
-          "fallbackChannel": "telegram|main-bot|123456789",
-          "agentChannels": {
-            "/home/user/agent-seo": "telegram|seo-bot|123456789",
-            "/home/user/agent-main": "telegram|main-bot|123456789"
-          }
-        }
-      }
-    }
-  }
-}
-```
-
----
-
-## Skill Example
-
-<details>
-<summary>Example orchestration skill (click to expand)</summary>
-
-The plugin is a **transparent transport layer** — business logic lives in **OpenClaw skills**:
-
-```markdown
----
-name: Coding Agent Orchestrator
-description: Orchestrates Claude Code sessions with auto-response rules.
-metadata: {"openclaw": {"requires": {"plugins": ["openclaw-claude-code-plugin"]}}}
----
-
-# Coding Agent Orchestrator
-
-## Auto-response rules
-
-When a Claude Code session asks a question, analyze and decide:
-
-### Auto-respond (use `claude_respond` immediately):
-- Permission requests for file reads, writes, or bash commands -> "Yes, proceed."
-- Confirmation prompts like "Should I continue?" -> "Yes, continue."
-
-### Forward to user:
-- Architecture decisions (Redis vs PostgreSQL, REST vs GraphQL...)
-- Destructive operations (deleting files, dropping tables...)
-- Anything involving credentials, secrets, or production environments
-
-## Workflow
-1. User sends a coding task -> `claude_launch(prompt, ...)`
-2. Session runs in background. Monitor via wake events.
-3. On wake event -> `claude_output` to read the question, then auto-respond or forward.
-4. On completion -> summarize the result and notify the user.
-```
-
-A comprehensive orchestration skill is available at [`skills/claude-code-orchestration/SKILL.md`](skills/claude-code-orchestration/SKILL.md).
-
-</details>
+> Plugin code changes require a gateway restart to reload the built extension.
 
 ---
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/getting-started.md](docs/getting-started.md) | Full setup guide and first-launch walkthrough |
-| [docs/API.md](docs/API.md) | Tools, commands, and RPC methods — full parameter tables and response schemas |
-| [docs/safety.md](docs/safety.md) | Pre-launch safety checks and troubleshooting |
-| [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md) | Notification architecture, delivery model, and wake mechanism |
-| [docs/AGENT_CHANNELS.md](docs/AGENT_CHANNELS.md) | Multi-agent setup, notification routing, and workspace mapping |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Architecture overview and component breakdown |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development guide, project structure, and build instructions |
+- `docs/ARCHITECTURE.md` — current harness architecture
+- `docs/DEVELOPMENT.md` — code layout + development notes
+- `docs/tools.md` — tool surface reference
+- `docs/safety.md` — legacy direct-session safety checks only
+- `docs/NOTIFICATIONS.md` — notification behavior
 
 ---
 
-## License
+## Source of truth
 
-MIT — see [package.json](package.json) for details.
+When docs and code disagree, the source of truth is:
+1. `src/tools/harness-execute.ts`
+2. `src/router.ts`
+3. `src/planner.ts`
+4. `src/review-loop.ts`
+5. live smoke results / checkpoint files

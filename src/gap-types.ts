@@ -67,7 +67,9 @@ ${Object.values(GAP_DEFINITIONS)
   .map((g) => `- ${g.type}: ${g.description}`)
   .join("\n")}
 
-Output your review as JSON:
+Your ENTIRE response must be a single JSON object. No markdown, no explanation, no code blocks. Just the JSON.
+
+Output schema:
 {
   "taskId": "<task id>",
   "result": "pass" | "fail",
@@ -80,6 +82,12 @@ Output your review as JSON:
   ],
   "rerunNeeded": true | false
 }
+
+Pass example:
+{"taskId":"task-1","result":"pass","gaps":[],"rerunNeeded":false}
+
+Fail example:
+{"taskId":"task-1","result":"fail","gaps":[{"type":"missing_core","evidence":"The required --force flag is not implemented in the changed command.","fixHint":"Add --force handling and update the command validation path."}],"rerunNeeded":true}
 
 Rules:
 - You are READ-ONLY. Never modify code yourself.

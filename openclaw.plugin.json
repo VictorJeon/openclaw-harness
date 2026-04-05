@@ -2,7 +2,7 @@
   "id": "openclaw-harness",
   "name": "OpenClaw Harness",
   "description": "Plan-Work-Review loop for coding tasks. Routes requests by complexity, dispatches workers, cross-model review with gap detection.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -17,7 +17,7 @@
       },
       "defaultModel": {
         "type": "string",
-        "description": "Default model for new sessions (e.g. 'sonnet', 'opus')"
+        "description": "Default model for legacy direct sessions and reviewer fallback"
       },
       "defaultWorkdir": {
         "type": "string",
@@ -84,11 +84,19 @@
       },
       "reviewModel": {
         "type": "string",
-        "description": "Model for cross-model review (defaults to codex). Should differ from worker model for blind-spot detection."
+        "description": "Model for Codex-side review. Should differ from the worker/planner model for blind-spot detection."
+      },
+      "plannerModel": {
+        "type": "string",
+        "description": "Preferred model selector for the internal model-backed planner. Defaults to Opus with Sonnet fallback."
+      },
+      "realtimeModel": {
+        "type": "string",
+        "description": "Preferred model selector for the tier 1+ Claude realtime worker (for example: 'sonnet', 'opus', or canonical Anthropic refs)."
       },
       "workerModel": {
         "type": "string",
-        "description": "Model for worker execution (defaults to claude). Used for tier 1 coding tasks."
+        "description": "Legacy fallback alias for realtimeModel. Still honored for compatibility."
       },
       "plannerModel": {
         "type": "string",
@@ -96,22 +104,27 @@
       },
       "memoryV3Endpoint": {
         "type": "string",
-        "description": "Memory V3 search endpoint (e.g. http://127.0.0.1:18790/v1/memory/search)"
+        "description": "Optional Memory V3 search endpoint used to enrich planner context."
       },
       "routerMaxTokens": {
         "type": "number",
         "default": 500,
-        "description": "Max tokens for Router tier classification"
+        "description": "Legacy compatibility field. Router classification is deterministic."
       },
       "plannerMaxTokens": {
         "type": "number",
         "default": 2000,
-        "description": "Max tokens for Planner output"
+        "description": "Legacy compatibility field. Planner output limits are managed by the model runner."
       },
       "reviewerMaxTokens": {
         "type": "number",
         "default": 1000,
-        "description": "Max tokens per task for Reviewer output"
+        "description": "Legacy compatibility field for reviewer output sizing."
+      },
+      "enableLegacyTools": {
+        "type": "boolean",
+        "default": false,
+        "description": "Expose legacy direct-session tools like harness_launch / harness_fg / harness_respond only when explicitly enabled."
       }
     }
   }

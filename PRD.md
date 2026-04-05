@@ -1,5 +1,7 @@
 # OpenClaw Harness v1 — Product Requirements Document
 
+> **Historical design document.** Large parts of this PRD describe the pre-realtime / ACP-first architecture and are no longer the source of truth. For the live architecture, read `docs/ARCHITECTURE.md` first.
+
 **작성일**: 2026-03-29  
 **작성자**: Sol (☀️)  
 **대상 독자**: Mason  

@@ -1,5 +1,13 @@
 import { Type } from "@sinclair/typebox";
-import { sessionManager, formatDuration, resolveOriginChannel, resolveAgentChannel, hasValidOriginChannel } from "../shared";
+import {
+  sessionManager,
+  formatDuration,
+  resolveOriginChannel,
+  resolveAgentChannel,
+  hasValidOriginChannel,
+  isLegacyToolsEnabled,
+  legacyToolDisabledResult,
+} from "../shared";
 import type { OpenClawPluginToolContext } from "../types";
 
 export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
@@ -25,7 +33,7 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
   return {
     name: "harness_fg",
     description:
-      "Bring a Claude Code session to foreground (by name or ID). Shows buffered output and streams new output.",
+      "[LEGACY] Bring a Claude Code session to foreground (by name or ID). Shows buffered output and streams new output. Only applies to sessions launched via harness_launch; harness_execute sessions are fully managed by the harness.",
     parameters: Type.Object({
       session: Type.String({
         description: "Session name or ID to bring to foreground",
@@ -37,6 +45,10 @@ export function makeClaudeFgTool(ctx?: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
+      if (!isLegacyToolsEnabled()) {
+        return legacyToolDisabledResult("harness_fg");
+      }
+
       if (!sessionManager) {
         return {
           content: [

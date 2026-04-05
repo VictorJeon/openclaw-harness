@@ -1,86 +1,116 @@
 # Development
 
-## Project Structure
+## Project layout
 
-```
-claude-code/
-├── index.ts                    # Plugin entry point (register function)
-├── openclaw.plugin.json        # Plugin manifest and config schema
-├── package.json                # Dependencies
+```txt
+openclaw-harness/
+├── index.ts
+├── openclaw.plugin.json
+├── package.json
 ├── src/
-│   ├── types.ts                # TypeScript interfaces
-│   ├── shared.ts               # Global state, helpers, formatting
-│   ├── session.ts              # Session class (SDK wrapper)
-│   ├── session-manager.ts      # Session pool management
-│   ├── notifications.ts        # NotificationRouter
-│   ├── gateway.ts              # RPC method registration
+│   ├── checkpoint.ts
+│   ├── planner.ts
+│   ├── review-loop.ts
+│   ├── reviewer.ts
+│   ├── router.ts
+│   ├── session-manager.ts
+│   ├── session.ts
+│   ├── shared.ts
 │   ├── tools/
-│   │   ├── claude-launch.ts    # claude_launch tool
-│   │   ├── claude-sessions.ts  # claude_sessions tool
-│   │   ├── claude-output.ts    # claude_output tool
-│   │   ├── claude-fg.ts        # claude_fg tool
-│   │   ├── claude-bg.ts        # claude_bg tool
-│   │   ├── claude-kill.ts      # claude_kill tool
-│   │   ├── claude-respond.ts   # claude_respond tool
-│   │   └── claude-stats.ts     # claude_stats tool
+│   │   ├── harness-execute.ts        # primary path
+│   │   ├── claude-launch.ts          # legacy
+│   │   ├── claude-sessions.ts        # legacy
+│   │   ├── claude-output.ts          # legacy
+│   │   ├── claude-fg.ts              # legacy
+│   │   ├── claude-bg.ts              # legacy
+│   │   ├── claude-kill.ts            # legacy
+│   │   ├── claude-respond.ts         # legacy
+│   │   └── claude-stats.ts
 │   └── commands/
-│       ├── claude.ts           # /claude command
-│       ├── claude-sessions.ts  # /claude_sessions command
-│       ├── claude-fg.ts        # /claude_fg command
-│       ├── claude-bg.ts        # /claude_bg command
-│       ├── claude-kill.ts      # /claude_kill command
-│       ├── claude-resume.ts    # /claude_resume command
-│       ├── claude-respond.ts   # /claude_respond command
-│       └── claude-stats.ts     # /claude_stats command
-├── skills/
-│   └── claude-code-orchestration/
-│       └── SKILL.md            # Orchestration skill definition
+│       └── claude*.ts                # legacy chat-command surface
 └── docs/
-    ├── API.md                  # Full API reference
-    ├── ARCHITECTURE.md         # Architecture overview
-    ├── NOTIFICATIONS.md        # Notification system details
-    └── DEVELOPMENT.md          # This file
 ```
 
 ---
 
-## Dependencies
+## Where to change what
 
-| Package | Purpose |
-|---|---|
-| `@anthropic-ai/claude-agent-sdk` | Claude Code SDK — the `query()` function that powers each session. |
-| `@sinclair/typebox` | JSON Schema type builder for tool parameter definitions. |
-| `nanoid` | Generates short unique session IDs (8 characters). |
+### Routing / decomposition
+- `src/router.ts`
+- `src/planner.ts`
 
----
+### Review / fix loop behavior
+- `src/review-loop.ts`
+- `src/tools/harness-execute.ts`
 
-## Key Design Decisions
+### Tier 2 realtime behavior
+- `src/tools/harness-execute.ts`
+- external helper script: `~/.openclaw/workspace-nova/scripts/claude-realtime.sh`
+- sync helper: `~/.openclaw/workspace-nova/scripts/git-sync.sh`
 
-1. **Foreground is per-channel, not per-session.** Multiple channels can watch the same session simultaneously, and one channel can have multiple sessions in foreground.
-
-2. **Multi-turn uses `AsyncIterable` prompts.** The `MessageStream` class implements `Symbol.asyncIterator` to feed user messages into the SDK's `query()` function as an async generator, keeping the session alive across turns.
-
-3. **Persisted sessions survive GC.** When a session is garbage-collected (1 hour after completion), its Claude session ID is retained in a separate `persistedSessions` map so it can be resumed later. Entries are stored under three keys (internal ID, name, Claude UUID) for flexible lookup.
-
-4. **Notifications use CLI shelling.** Since the plugin API doesn't expose a runtime `sendMessage` method, outbound notifications go through `openclaw message send` via `child_process.execFile`.
-
-5. **Metrics are in-memory only.** Session metrics are aggregated in the `SessionManager` and reset on service restart. They are not persisted to disk. Cost data is tracked internally but not exposed in any user-facing output.
-
-6. **Waiting-for-input uses dual detection.** End-of-turn detection (when a multi-turn result resolves) is the primary signal, backed by a 15-second safety-net timer for edge cases. A `waitingForInputFired` flag prevents duplicate wake events.
-
-7. **Channel `"unknown"` falls through.** If `channelId` is `"unknown"`, the notification system explicitly falls through to `fallbackChannel` rather than attempting delivery to an invalid destination.
+### Legacy direct-session behavior
+- `src/session.ts`
+- `src/session-manager.ts`
+- `src/tools/claude-*.ts`
+- `src/commands/claude-*.ts`
 
 ---
 
-## Adding a New Tool or Command
+## Current implementation notes
 
-1. Create a new file under `src/tools/` or `src/commands/`.
-2. Export a `registerXxxTool(api)` or `registerXxxCommand(api)` function.
-3. Import and call it in `index.ts` inside the `register()` function.
+### Tier 1
+- `claude-realtime.sh` worker on Hetzner
+- Codex CLI review
+- realtime follow-up fixes continue in same worker session
+
+### Tier 2
+- same `claude-realtime.sh` worker path as Tier 1
+- embedded caller-agent plan review
+- local sync-back before Codex review
+- completed realtime worker results recover on resume
+
+### Planner behavior
+- planner is deterministic; do not assume a hidden model call here
+- common single-feature workflows should usually stay one task
+- avoid reintroducing over-decomposition for tiny coding requests
 
 ---
 
-## Service Lifecycle
+## Build / reload
 
-- **`start()`** — Creates `SessionManager` and `NotificationRouter`, wires them together, starts the long-running reminder check interval (60s), and starts a GC interval (5 min).
-- **`stop()`** — Stops the notification router, kills all active sessions, clears intervals, and nulls singletons.
+```bash
+cd /Users/nova/.openclaw/extensions/openclaw-harness
+npm run build
+openclaw gateway restart
+```
+
+Notes:
+- docs-only edits do **not** require a restart
+- plugin code edits do require restart after rebuild
+- treat gateway restart as expensive; batch changes when possible
+
+---
+
+## Validation habits
+
+When changing harness behavior, prefer direct proof over inference:
+- inspect checkpoint files in `/tmp/harness/.../checkpoint.json`
+- inspect realtime state in `/tmp/claude-realtime/...`
+- verify repo state with `git log`, file reads, and tests
+- do at least one fresh smoke for the changed path
+
+Typical smoke patterns:
+- **tier 1**: small repo + realtime worker launch + Codex review + one follow-up fix
+- **tier 2**: realtime repo + embedded plan review + same-session follow-up + final Codex review
+
+---
+
+## Documentation maintenance rule
+
+If you change any of these, update docs in the same PR/commit set:
+- tier routing rules
+- planner decomposition rules
+- whether router/planner are deterministic vs model-driven
+- review loop behavior
+- worker/reviewer model choice
+- legacy vs primary execution guidance
