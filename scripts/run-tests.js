@@ -146,6 +146,29 @@ async function testModelPlannerFallsBackToHeuristic() {
   }
 }
 
+async function testModelPlannerMergesImplementationAndTests() {
+  const { mod: planner, cleanup } = loadTsModule("src/planner.ts");
+
+  try {
+    const plan = await planner.buildModelPlan(
+      "Implement a Kalshi Kelly optimizer and add tests.",
+      "",
+      "/tmp/project",
+      async () => ({
+        launchModel: "opus",
+        output: '```json\n{"tasks":[{"id":"task-1","title":"Implement Kalshi Kelly optimizer","scope":"scripts/optuna/kalshi_kelly_optimizer.py","acceptance_criteria":["optimizer script exists"],"agent":"codex"},{"id":"task-2","title":"Add tests for Kalshi Kelly optimizer","scope":"tests/test_kalshi_kelly_optimizer.py","acceptance_criteria":["pytest tests/test_kalshi_kelly_optimizer.py passes"],"agent":"codex"},{"id":"task-3","title":"Verify build and summarize","scope":"Run tests and report files changed","acceptance_criteria":["tests pass","files changed summarized"],"agent":"codex"}],"mode":"sequential","estimated_complexity":"medium"}\n```',
+      }),
+    );
+
+    assert.equal(plan.tasks.length, 1, "implementation, tests, and verification should remain one coherent task");
+    assert.match(plan.tasks[0].scope, /kalshi_kelly_optimizer\.py/);
+    assert.match(plan.tasks[0].scope, /test_kalshi_kelly_optimizer\.py/);
+    assert.ok(plan.tasks[0].acceptanceCriteria.some((c) => /pytest tests\/test_kalshi_kelly_optimizer\.py passes/.test(c)));
+  } finally {
+    cleanup();
+  }
+}
+
 function testReviewerBackendSelection() {
   const { mod: reviewerRunner, cleanup } = loadTsModule("src/reviewer-runner.ts");
 
@@ -442,6 +465,7 @@ const tests = [
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
   ["model planner falls back to sonnet before succeeding", testModelPlannerFallsBackToSonnet],
   ["model planner falls back to heuristic after planner failures", testModelPlannerFallsBackToHeuristic],
+  ["model planner merges implementation, tests, and verification", testModelPlannerMergesImplementationAndTests],
   ["reviewer backend selection routes GPT reviewer to Codex", testReviewerBackendSelection],
   ["claude model resolution normalizes canonical refs", testClaudeModelResolutionNormalizesCanonicalRefs],
   ["reviewer command uses Codex read-only path", testReviewerCommandUsesCodexReadOnlyPath],

@@ -180,6 +180,7 @@ export function buildPlannerPrompt(request: string, memoryContext: string): stri
     `## Rules`,
     `- Prefer fewer, coherent tasks over many literal fragments.`,
     `- Group file references under the real implementation task; never emit a standalone file-name task.`,
+    `- Keep implementation + tests + build verification together when they belong to one change. Do NOT split tests-only or verification-only follow-up tasks unless they operate on disjoint files.`,
     `- Ignore report-only sections like Return:, Output:, Deliverables:, or response-format bullets when forming tasks.`,
     `- Scope must be specific (file paths, function names).`,
     `- Acceptance criteria must be concrete and testable.`,
@@ -336,8 +337,9 @@ function yamlToHarnessPlan(
   request: string,
   metadata: PlannerMetadata,
 ): HarnessPlan {
-  const tasks: TaskSpec[] = parsed.tasks.map((task, index) => ({
-    id: task.id || nextTaskId(index),
+  const normalized = normalizePlannerTasks(parsed.tasks);
+  const tasks: TaskSpec[] = normalized.map((task, index) => ({
+    id: nextTaskId(index),
     title: task.title.length > 60 ? task.title.slice(0, 57) + "..." : task.title,
     scope: task.scope,
     acceptanceCriteria: task.acceptance_criteria,
@@ -368,6 +370,63 @@ function yamlToHarnessPlan(
     tier: 2,
     plannerMetadata: metadata,
   };
+}
+
+function normalizePlannerTasks(
+  tasks: ParsedPlannerOutput["tasks"],
+): ParsedPlannerOutput["tasks"] {
+  const merged: ParsedPlannerOutput["tasks"] = [];
+
+  for (const task of tasks) {
+    const previous = merged[merged.length - 1];
+    if (previous && shouldMergePlannerTask(previous, task)) {
+      previous.scope = mergeScope(previous.scope, task.scope);
+      previous.acceptance_criteria = unique([
+        ...previous.acceptance_criteria,
+        ...task.acceptance_criteria,
+      ]);
+      continue;
+    }
+    merged.push({
+      ...task,
+      acceptance_criteria: [...task.acceptance_criteria],
+    });
+  }
+
+  return merged;
+}
+
+function shouldMergePlannerTask(
+  previous: ParsedPlannerOutput["tasks"][0],
+  current: ParsedPlannerOutput["tasks"][0],
+): boolean {
+  const currentText = `${current.title}\n${current.scope}\n${current.acceptance_criteria.join("\n")}`;
+  const currentFiles = extractScopeFiles(current.scope);
+  const prevFiles = extractScopeFiles(previous.scope);
+
+  const testOnlyFiles = currentFiles.length > 0 && currentFiles.every(isTestFile);
+  const testsOnlyTask = /(test|tests|pytest|spec|unit test|integration test)/i.test(currentText)
+    && (testOnlyFiles || currentFiles.length === 0);
+  const verificationOnlyTask = /(verify|validation|build|dry-run|smoke|summary|report|commit hash|files changed)/i.test(currentText)
+    && currentFiles.every((file) => isTestFile(file) || !file);
+  const overlapsPrevious = currentFiles.length === 0
+    || currentFiles.some((file) => prevFiles.includes(file))
+    || currentFiles.every(isTestFile);
+
+  return overlapsPrevious && (testsOnlyTask || verificationOnlyTask);
+}
+
+function mergeScope(base: string, extra: string): string {
+  const normalizedBase = normalizeText(base);
+  const normalizedExtra = normalizeText(extra);
+  if (!normalizedExtra || normalizedBase.includes(normalizedExtra)) {
+    return base;
+  }
+  return `${base}\nAlso include: ${normalizedExtra}`;
+}
+
+function isTestFile(file: string): boolean {
+  return /(^|\/)(test|tests)\//i.test(file) || /\.(test|spec)\.[^.]+$/i.test(file);
 }
 
 function uniquePlannerModels(models: string[]): string[] {
