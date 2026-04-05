@@ -464,6 +464,7 @@ function testFindRecoverableCheckpointMatchesRequestAndWorkdir() {
   const { mod: checkpointMod, cleanup } = loadTsModule("src/checkpoint.ts");
   const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-"));
   const otherWorkdir = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-other-"));
+  const isolatedExecDir = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-exec-"));
 
   try {
     const matchingPlan = {
@@ -499,11 +500,11 @@ function testFindRecoverableCheckpointMatchesRequestAndWorkdir() {
       tier: 2,
     };
 
-    const matching = checkpointMod.initCheckpoint(matchingPlan, workdir);
+    const matching = checkpointMod.initCheckpoint(matchingPlan, workdir, isolatedExecDir);
     checkpointMod.recordSession(matching, "task-1", "worker", "job-1", workdir);
     checkpointMod.updateTaskStatus(matching, "task-1", "in-review", workdir, { reviewPassed: false });
 
-    checkpointMod.initCheckpoint(pendingOnlyPlan, workdir);
+    checkpointMod.initCheckpoint(pendingOnlyPlan, workdir, workdir);
 
     const other = checkpointMod.initCheckpoint(otherWorkdirPlan, otherWorkdir);
     checkpointMod.recordSession(other, "task-1", "worker", "job-2", otherWorkdir);
@@ -513,9 +514,11 @@ function testFindRecoverableCheckpointMatchesRequestAndWorkdir() {
     assert.ok(recovered, "expected a recoverable checkpoint");
     assert.equal(recovered.runId, "plan-test-recover-match");
     assert.equal(recovered.workdir, require("node:path").resolve(workdir));
+    assert.equal(recovered.executionWorkdir, require("node:path").resolve(isolatedExecDir));
   } finally {
     rmSync(workdir, { recursive: true, force: true });
     rmSync(otherWorkdir, { recursive: true, force: true });
+    rmSync(isolatedExecDir, { recursive: true, force: true });
     cleanup();
   }
 }

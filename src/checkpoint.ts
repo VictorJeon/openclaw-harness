@@ -26,10 +26,11 @@ function checkpointPath(workdir: string, runId: string): string {
 /**
  * Initialize a checkpoint for a new harness run.
  */
-export function initCheckpoint(plan: HarnessPlan, workdir: string): CheckpointData {
+export function initCheckpoint(plan: HarnessPlan, workdir: string, executionWorkdir: string = workdir): CheckpointData {
   const checkpoint: CheckpointData = {
     runId: plan.id,
     workdir: resolve(workdir),
+    executionWorkdir: resolve(executionWorkdir),
     status: "running",
     plan,
     tasks: plan.tasks.map((t) => ({
@@ -177,7 +178,7 @@ export function findRecoverableCheckpoint(request: string, workdir: string): Che
       .filter((checkpoint): checkpoint is CheckpointData => checkpoint !== null)
       .filter((checkpoint) => checkpoint.status === "running")
       .filter((checkpoint) => checkpoint.plan?.originalRequest === request)
-      .filter((checkpoint) => checkpoint.workdir === normalizedWorkdir)
+      .filter((checkpoint) => checkpoint.workdir === normalizedWorkdir || checkpoint.executionWorkdir === normalizedWorkdir)
       .filter((checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0)
       .sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
 

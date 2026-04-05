@@ -231,7 +231,7 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       const preparedWorkspace = prepareExecutionWorkspace(workdir, plan.id);
 
       // Step 5: Initialize checkpoint
-      const checkpoint = initCheckpoint(plan, preparedWorkspace.executionWorkdir);
+      const checkpoint = initCheckpoint(plan, workdir, preparedWorkspace.executionWorkdir);
 
       // Step 6: Execute tasks (sequential or parallel based on plan.mode)
       const taskResults = await executePlan(plan, preparedWorkspace.executionWorkdir, maxBudgetUsd, ctx, checkpoint);
