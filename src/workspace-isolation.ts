@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { tmpdir } from "os";
 import { basename, dirname, join, relative, resolve } from "path";
@@ -45,6 +45,15 @@ function hasDirtyWorktree(repoRoot: string): boolean {
   }
 }
 
+function hasHeadCommit(repoRoot: string): boolean {
+  try {
+    runGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const PROJECT_CONTEXT_FILES = [
   "CLAUDE.md",
   "AGENTS.md",
@@ -83,6 +92,21 @@ function copyUntrackedFiles(repoRoot: string, cloneDir: string): void {
   }
 }
 
+function copyWorkingTreeContents(repoRoot: string, cloneDir: string): void {
+  for (const entry of readdirSync(repoRoot, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
+    cpSync(join(repoRoot, entry.name), join(cloneDir, entry.name), {
+      recursive: true,
+      dereference: false,
+    });
+  }
+}
+
+function configureSnapshotGitIdentity(repoRoot: string): void {
+  runGit(repoRoot, ["config", "user.name", "OpenClaw Harness"]);
+  runGit(repoRoot, ["config", "user.email", "harness@openclaw.local"]);
+}
+
 function writeIsolationState(repoRoot: string, planId: string, executionWorkdir: string, cleanupRoot: string): string {
   const statePath = join(cleanupRoot, "execution-workspaces", `${planId}.json`);
   mkdirSync(dirname(statePath), { recursive: true });
@@ -112,19 +136,28 @@ export function prepareExecutionWorkspace(originalWorkdir: string, planId: strin
 
   const tempRoot = mkdtempSync(join(tmpdir(), "openclaw-harness-exec-"));
   const tempDir = join(tempRoot, basename(repoRoot));
-  runGit(process.cwd(), ["clone", "--quiet", repoRoot, tempDir]);
-  runGit(tempDir, ["reset", "--hard", "HEAD"]);
+  const repoHasHead = hasHeadCommit(repoRoot);
 
-  const trackedPatch = readGitPatch(repoRoot, ["diff", "--binary", "HEAD"]);
-  if (trackedPatch.trim()) {
-    execFileSync("git", ["apply", "--binary", "-"], {
-      cwd: tempDir,
-      input: trackedPatch,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  runGit(process.cwd(), ["clone", "--quiet", repoRoot, tempDir]);
+  configureSnapshotGitIdentity(tempDir);
+
+  if (repoHasHead) {
+    runGit(tempDir, ["reset", "--hard", "HEAD"]);
+
+    const trackedPatch = readGitPatch(repoRoot, ["diff", "--binary", "HEAD"]);
+    if (trackedPatch.trim()) {
+      execFileSync("git", ["apply", "--binary", "-"], {
+        cwd: tempDir,
+        input: trackedPatch,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
+
+    copyUntrackedFiles(repoRoot, tempDir);
+  } else {
+    copyWorkingTreeContents(repoRoot, tempDir);
   }
 
-  copyUntrackedFiles(repoRoot, tempDir);
   runGit(tempDir, ["add", "-A"]);
 
   try {
@@ -146,6 +179,7 @@ export function prepareExecutionWorkspace(originalWorkdir: string, planId: strin
 export function materializeExecutionWorkspace(prepared: PreparedExecutionWorkspace): { applied: boolean; patchPath?: string; error?: string } {
   if (!prepared.isolated) return { applied: false };
 
+  runGit(prepared.executionWorkdir, ["add", "-A"]);
   const patch = readGitPatch(prepared.executionWorkdir, ["diff", "--binary", "HEAD"]);
   if (!patch.trim()) {
     try {

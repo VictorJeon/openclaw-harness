@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
-const { mkdtempSync, rmSync, symlinkSync } = require("node:fs");
+const { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
+const { execFileSync } = require("node:child_process");
 const { tmpdir } = require("node:os");
 const { basename, join, resolve } = require("node:path");
 const esbuild = require("esbuild");
@@ -166,6 +167,34 @@ async function testModelPlannerMergesImplementationAndTests() {
     assert.ok(plan.tasks[0].acceptanceCriteria.some((c) => /pytest tests\/test_kalshi_kelly_optimizer\.py passes/.test(c)));
   } finally {
     cleanup();
+  }
+}
+
+function testWorkspaceIsolationHandlesUnbornHeadRepos() {
+  const tempRepo = mkdtempSync(join(tmpdir(), "openclaw-harness-unborn-head-"));
+  const { mod: isolation, cleanup } = loadTsModule("src/workspace-isolation.ts");
+
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: tempRepo });
+    writeFileSync(join(tempRepo, "README.md"), "initial\n", "utf8");
+    writeFileSync(join(tempRepo, "CLAUDE.md"), "# context\n", "utf8");
+
+    const prepared = isolation.prepareExecutionWorkspace(tempRepo, "plan-unborn-head");
+    assert.equal(prepared.isolated, true);
+    assert.notEqual(prepared.executionWorkdir, tempRepo);
+    assert.equal(readFileSync(join(prepared.executionWorkdir, "README.md"), "utf8"), "initial\n");
+    assert.ok(existsSync(join(prepared.executionWorkdir, ".git")), "clone should remain a git repo");
+
+    writeFileSync(join(prepared.executionWorkdir, "README.md"), "updated\n", "utf8");
+    writeFileSync(join(prepared.executionWorkdir, "NEW.md"), "new file\n", "utf8");
+
+    const materialized = isolation.materializeExecutionWorkspace(prepared);
+    assert.equal(materialized.applied, true);
+    assert.equal(readFileSync(join(tempRepo, "README.md"), "utf8"), "updated\n");
+    assert.equal(readFileSync(join(tempRepo, "NEW.md"), "utf8"), "new file\n");
+  } finally {
+    cleanup();
+    rmSync(tempRepo, { recursive: true, force: true });
   }
 }
 
@@ -827,6 +856,7 @@ const tests = [
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],
   ["checkpoint finds recoverable run through symlinked workdir alias", testFindRecoverableCheckpointMatchesSymlinkedWorkdir],
+  ["workspace isolation handles repos without HEAD commits", testWorkspaceIsolationHandlesUnbornHeadRepos],
   ["local-cc backend reuses completed execute output by jobId", testLocalCcBackendReusesCompletedExecuteOutput],
   ["local-cc backend reuses continue output and finalizes cleanly", testLocalCcBackendReusesContinueOutputAndFinalizes],
   ["local-cc backend reports missing claude CLI clearly", testLocalCcBackendReportsMissingCliClearly],
