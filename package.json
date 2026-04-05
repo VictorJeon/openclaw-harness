@@ -1,6 +1,6 @@
 {
   "name": "openclaw-harness",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
@@ -42,11 +42,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alizarion/openclaw-claude-code-plugin.git"
+    "url": "git+https://github.com/VictorJeon/openclaw-harness-private.git"
   },
-  "homepage": "https://github.com/alizarion/openclaw-claude-code-plugin#readme",
+  "homepage": "https://github.com/VictorJeon/openclaw-harness-private#readme",
   "bugs": {
-    "url": "https://github.com/alizarion/openclaw-claude-code-plugin/issues"
+    "url": "https://github.com/VictorJeon/openclaw-harness-private/issues"
   },
   "license": "MIT",
   "author": "Betrue <hello@betrue.fr>",

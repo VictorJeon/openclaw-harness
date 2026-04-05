@@ -77,7 +77,7 @@ Useful parameters:
 
 Typical flow:
 1. deterministic router classifies complexity
-2. deterministic planner builds task list
+2. model-backed planner builds the task list (Opus primary, Sonnet fallback)
 3. realtime worker executes for tier 1+
 4. Codex CLI reviewer checks gaps
 5. fix loop runs if needed
@@ -106,10 +106,45 @@ For new automated coding tasks, prefer **`harness_execute`**.
 
 ---
 
+## Install from GitHub
+
+```bash
+git clone https://github.com/VictorJeon/openclaw-harness-private.git ~/.openclaw/extensions/openclaw-harness
+cd ~/.openclaw/extensions/openclaw-harness
+npm install
+npm run build
+```
+
+For stable rollouts, pin to a known-good commit instead of tracking `main` blindly (current recommended pin: `8c82e24`).
+
+Then enable it in `~/.openclaw/openclaw.json`:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "openclaw-harness": {
+        enabled: true,
+        config: {
+          operationMode: "autonomous",
+          plannerModel: "anthropic/claude-opus-4-6",
+          reviewModel: "openai-codex/gpt-5.4",
+          realtimeModel: "anthropic/claude-opus-4-6",
+          enableLegacyTools: false
+        }
+      }
+    }
+  }
+}
+```
+
+After config changes, restart the gateway.
+
 ## Local development
 
 ```bash
 cd /Users/nova/.openclaw/extensions/openclaw-harness
+npm install
 npm run build
 openclaw gateway restart
 ```
