@@ -5,6 +5,8 @@ import { homedir, tmpdir } from "os";
 import { basename, join, relative, resolve } from "path";
 import { Type } from "@sinclair/typebox";
 import { getSessionManager, pluginConfig, getPluginRuntime } from "../shared";
+import { resolveWorkerBackend } from "../backend/factory";
+import type { WorkerExecutionContext } from "../backend/types";
 import { classifyRequest } from "../router";
 import { buildPlan, buildModelPlan, searchMemory } from "../planner";
 import {
@@ -291,13 +293,13 @@ const REALTIME_PULL_TIMEOUT_MS = 180_000;
 const REALTIME_POLL_INTERVAL_MS = 5_000;
 const REALTIME_MAX_WAIT_MS = 2 * 60 * 60 * 1000 + 5 * 60 * 1000;
 
-interface RealtimeLaunchResult {
+export interface RealtimeLaunchResult {
   jobId: string;
   stateDir: string;
   output: string;
 }
 
-interface RealtimeExecutionResult extends RealtimeLaunchResult {
+export interface RealtimeExecutionResult extends RealtimeLaunchResult {
   status: string;
   workerResult: WorkerResult | null;
   error?: string;
@@ -430,11 +432,28 @@ async function executeTask(
   // workers. workerModel remains as a legacy fallback for compatibility.
   const workerModel = pluginConfig.realtimeModel ?? pluginConfig.workerModel ?? "claude";
   const reviewModel = pluginConfig.reviewModel ?? "codex";
-  // 2026-04-04 unification: all coding work (tier 1+) routes through the realtime worker.
-  // The Claude SDK subagent / sessionManager worker paths are deprecated for coding tasks.
-  // Phase 1 backend split only adds the workerBackend seam in src/backend/* and config.
-  // executeTask intentionally stays on the current direct realtime path until phase 2 dispatch migration.
-  const useRealtimeWorker = plan.tier >= 1;
+  // Phase 2 dispatch: tier 1+ tasks resolve their backend through the factory
+  // instead of inline selection. Tier 0 still falls through to sessionManager.spawn.
+  const useBackendDispatch = plan.tier >= 1;
+  const backend = useBackendDispatch ? resolveWorkerBackend(pluginConfig) : null;
+  const isRealtimeBackend = backend?.name === "remote-realtime";
+
+  // Fail fast if the resolved backend is not available (e.g. local-cc stub).
+  // This ensures the stub's error message is returned verbatim to the caller
+  // without passing through any realtime-specific recovery or formatting.
+  if (backend && !backend.available()) {
+    updateTaskStatus(checkpoint, task.id, "failed", workdir);
+    return {
+      taskId: task.id,
+      workerSessionId: "",
+      workerResult: null,
+      reviewPassed: false,
+      reviewLoops: 0,
+      escalated: true,
+      error: `Worker backend "${backend.name}" is not available: ${backend.describe()}`,
+    };
+  }
+
   const reviewerTarget = resolveReviewerExecutionTarget(
     reviewModel,
     pluginConfig.defaultModel,
@@ -460,50 +479,49 @@ async function executeTask(
     const workerPrompt = buildWorkerPrompt(task, plan);
     let workerResult: WorkerResult | null = null;
 
-    if (useRealtimeWorker) {
-      // 2026-04-04 unification: all tier 1+ coding work goes through the realtime worker.
-      const existingRealtimeJobId = checkpoint.sessions[task.id]?.worker ?? "";
-      const recoveredRealtimeResult = existingRealtimeJobId
-        ? recoverCompletedRealtimeWorkerResult(task.id, existingRealtimeJobId)
+    if (useBackendDispatch && backend) {
+      // Phase 2: tier 1+ coding work dispatches through the resolved backend.
+      // Checkpoint recovery only applies to remote-realtime (state dir on disk)
+      const existingJobId = checkpoint.sessions[task.id]?.worker ?? "";
+      const recoveredResult = isRealtimeBackend && existingJobId
+        ? recoverCompletedRealtimeWorkerResult(task.id, existingJobId)
         : null;
 
-      if (recoveredRealtimeResult) {
-        workerSessionId = existingRealtimeJobId;
-        workerResult = recoveredRealtimeResult;
+      if (recoveredResult) {
+        workerSessionId = existingJobId;
+        workerResult = recoveredResult;
         console.log(
-          `[harness] Recovered completed realtime worker from checkpoint: task=${task.id}, jobId=${workerSessionId}`,
+          `[harness] Recovered completed worker from checkpoint: task=${task.id}, jobId=${workerSessionId}, backend=${backend.name}`,
         );
       } else {
-        workerSessionId = existingRealtimeJobId || buildRealtimeJobId(plan.id, task.id);
-        // Persist the realtime job id before launch/wait so resume can recover if the tool turn dies
+        workerSessionId = existingJobId || buildRealtimeJobId(plan.id, task.id);
+        // Persist the job id before launch/wait so resume can recover if the tool turn dies
         recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
 
-        const realtimeResult = await executeRealtimeTask(
-          task,
-          plan,
-          workdir,
-          ctx,
-          workerModel,
-          workerSessionId,
-        );
+        const backendCtx: WorkerExecutionContext = {
+          task, plan, workdir, ctx, workerModel, jobId: workerSessionId,
+        };
+        const backendResult = await backend.executeWorker(backendCtx);
 
-        if (!isRealtimeReviewReadyStatus(realtimeResult.status) || !realtimeResult.workerResult) {
+        if (!isRealtimeReviewReadyStatus(backendResult.status) || !backendResult.workerResult) {
           updateTaskStatus(checkpoint, task.id, "failed", workdir, {
-            workerResult: realtimeResult.workerResult ?? undefined,
+            workerResult: backendResult.workerResult ?? undefined,
           });
-          const realtimeError = realtimeResult.error ?? `Realtime job ${workerSessionId} ended with status=${realtimeResult.status}`;
+          const backendError = backendResult.error ?? `Worker job ${workerSessionId} ended with status=${backendResult.status}`;
           return {
             taskId: task.id,
             workerSessionId,
-            workerResult: realtimeResult.workerResult,
+            workerResult: backendResult.workerResult,
             reviewPassed: false,
             reviewLoops: 0,
             escalated: true,
-            error: formatRealtimeFailureForCaller(ctx, workdir, realtimeError),
+            error: isRealtimeBackend
+              ? formatRealtimeFailureForCaller(ctx, workdir, backendError)
+              : backendError,
           };
         }
 
-        workerResult = realtimeResult.workerResult;
+        workerResult = backendResult.workerResult;
       }
     } else {
       // === Fallback: sessionManager.spawn (CC PTY) — only reachable for tier 0 edge cases ===
@@ -525,7 +543,7 @@ async function executeTask(
 
     recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
     console.log(
-      `[harness] Worker done: task=${task.id}, session=${workerSessionId}, model=${workerModel}, realtimeWorker=${useRealtimeWorker}`,
+      `[harness] Worker done: task=${task.id}, session=${workerSessionId}, model=${workerModel}, backend=${backend?.name ?? "session-fallback"}`,
     );
 
     if (!workerResult) {
@@ -621,25 +639,22 @@ async function executeTask(
       console.log(`[harness] Review result: task=${task.id}, action=${action.action}, gaps=${reviewResult.gaps.length}`);
 
       if (action.action === "pass") {
-        if (useRealtimeWorker) {
-          const realtimeFinalize = await finalizeRealtimeTask(
-            task,
-            plan,
-            workdir,
-            ctx,
-            workerSessionId,
-          );
-          if (realtimeFinalize.workerResult) {
-            currentWorkerResult = realtimeFinalize.workerResult;
+        if (useBackendDispatch && backend) {
+          const backendCtx: WorkerExecutionContext = {
+            task, plan, workdir, ctx, workerModel, jobId: workerSessionId,
+          };
+          const finalizeResult = await backend.finalizeWorker(backendCtx);
+          if (finalizeResult.workerResult) {
+            currentWorkerResult = finalizeResult.workerResult;
           }
-          if (realtimeFinalize.status !== "done") {
+          if (finalizeResult.status !== "done") {
             updateTaskStatus(checkpoint, task.id, "failed", workdir, {
               reviewPassed: false,
               reviewLoop: reviewLoop.currentLoop,
               reviewResult,
               workerResult: currentWorkerResult,
             });
-            const realtimeError = realtimeFinalize.error ?? `Tier 2 realtime finalization ended with status=${realtimeFinalize.status}`;
+            const finalizeError = finalizeResult.error ?? `Worker finalization ended with status=${finalizeResult.status}`;
             return {
               taskId: task.id,
               workerSessionId,
@@ -647,7 +662,9 @@ async function executeTask(
               reviewPassed: false,
               reviewLoops: reviewLoop.history.length,
               escalated: true,
-              error: formatRealtimeFailureForCaller(ctx, workdir, realtimeError),
+              error: isRealtimeBackend
+                ? formatRealtimeFailureForCaller(ctx, workdir, finalizeError)
+                : finalizeError,
             };
           }
         }
@@ -685,39 +702,37 @@ async function executeTask(
         };
       }
 
-      // action === "fix": feed gap feedback back into the same realtime worker
+      // action === "fix": feed gap feedback back into the worker via backend dispatch
       if (action.action === "fix") {
-        if (useRealtimeWorker) {
-          const realtimeFollowUp = await continueRealtimeTask(
-            task,
-            plan,
-            workdir,
-            ctx,
-            workerSessionId,
-            action.fixPrompt,
-          );
+        if (useBackendDispatch && backend) {
+          const backendCtx: WorkerExecutionContext = {
+            task, plan, workdir, ctx, workerModel, jobId: workerSessionId,
+          };
+          const followUpResult = await backend.continueWorker(backendCtx, action.fixPrompt);
 
-          if (!isRealtimeReviewReadyStatus(realtimeFollowUp.status) || !realtimeFollowUp.workerResult) {
+          if (!isRealtimeReviewReadyStatus(followUpResult.status) || !followUpResult.workerResult) {
             updateTaskStatus(checkpoint, task.id, "failed", workdir, {
               reviewPassed: false,
               reviewLoop: reviewLoop.currentLoop,
               reviewResult,
-              workerResult: realtimeFollowUp.workerResult ?? currentWorkerResult,
+              workerResult: followUpResult.workerResult ?? currentWorkerResult,
             });
-            const realtimeError = realtimeFollowUp.error ?? `Realtime follow-up ended with status=${realtimeFollowUp.status}`;
+            const followUpError = followUpResult.error ?? `Worker follow-up ended with status=${followUpResult.status}`;
             return {
               taskId: task.id,
               workerSessionId,
-              workerResult: realtimeFollowUp.workerResult ?? currentWorkerResult,
+              workerResult: followUpResult.workerResult ?? currentWorkerResult,
               reviewPassed: false,
               reviewLoops: reviewLoop.history.length,
               escalated: true,
               escalationReason: formatEscalation(plan, reviewLoop, task),
-              error: formatRealtimeFailureForCaller(ctx, workdir, realtimeError),
+              error: isRealtimeBackend
+                ? formatRealtimeFailureForCaller(ctx, workdir, followUpError)
+                : followUpError,
             };
           }
 
-          currentWorkerResult = realtimeFollowUp.workerResult;
+          currentWorkerResult = followUpResult.workerResult;
           updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
             reviewPassed: false,
             reviewLoop: reviewLoop.currentLoop,
@@ -770,7 +785,7 @@ async function executeTask(
       reviewPassed: false,
       reviewLoops: 0,
       escalated: true,
-      error: useRealtimeWorker
+      error: isRealtimeBackend
         ? formatRealtimeFailureForCaller(ctx, workdir, detailedError)
         : detailedError,
     };
@@ -791,7 +806,7 @@ interface SessionCompletion {
   error?: string;
 }
 
-async function executeRealtimeTask(
+export async function executeRealtimeTask(
   task: TaskSpec,
   plan: HarnessPlan,
   workdir: string,
@@ -812,7 +827,7 @@ async function executeRealtimeTask(
   return await waitForRealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, launch.jobId, launch.stateDir, "round-complete");
 }
 
-async function continueRealtimeTask(
+export async function continueRealtimeTask(
   task: TaskSpec,
   plan: HarnessPlan,
   workdir: string,
@@ -827,7 +842,7 @@ async function continueRealtimeTask(
   return await waitForRealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, jobId, stateDir, "round-complete");
 }
 
-async function finalizeRealtimeTask(
+export async function finalizeRealtimeTask(
   task: TaskSpec,
   plan: HarnessPlan,
   workdir: string,

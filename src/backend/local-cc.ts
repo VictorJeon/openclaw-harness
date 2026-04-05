@@ -1,4 +1,7 @@
-import type { WorkerBackendHandler } from "./types";
+import type { WorkerBackendHandler, WorkerExecutionResult } from "./types";
+
+const NOT_IMPLEMENTED_MESSAGE =
+  'local-cc worker backend is not yet implemented. Set workerBackend="remote-realtime" or wait for phase 3.';
 
 export const localCcBackend: WorkerBackendHandler = {
   name: "local-cc",
@@ -6,8 +9,18 @@ export const localCcBackend: WorkerBackendHandler = {
     return false;
   },
   describe() {
-    return "Future opt-in local Claude Code backend (phase-1 placeholder).";
+    return "Future opt-in local Claude Code backend (phase-2 stub — not yet implemented).";
+  },
+
+  async executeWorker(): Promise<WorkerExecutionResult> {
+    throw new Error(NOT_IMPLEMENTED_MESSAGE);
+  },
+
+  async continueWorker(): Promise<WorkerExecutionResult> {
+    throw new Error(NOT_IMPLEMENTED_MESSAGE);
+  },
+
+  async finalizeWorker(): Promise<WorkerExecutionResult> {
+    throw new Error(NOT_IMPLEMENTED_MESSAGE);
   },
 };
-
-// TODO: Phase 2/3 should replace this placeholder with the real local Claude Code worker path.
