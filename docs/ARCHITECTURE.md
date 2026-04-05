@@ -53,6 +53,20 @@ request
 
 ---
 
+## Worker backend seam (phase 1)
+
+The harness is moving toward a **one-repo / two-backend** structure:
+
+- `remote-realtime` = current default / stable lane
+- `local-cc` = future opt-in / public lane
+
+Phase 1 adds only the seam:
+- `workerBackend` config/schema support
+- `src/backend/*` backend modules and factory
+- docs describing the lane split
+
+Phase 1 does **not** change dispatch yet. `executeTask()` still uses the current direct realtime path until a later phase swaps execution over to the backend factory.
+
 ## Tier model
 
 | Tier | Worker path | Review path |

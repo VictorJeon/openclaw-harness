@@ -23,6 +23,7 @@ const DEFAULT_PLUGIN_CONFIG: PluginConfig = {
   routerMaxTokens: 500,
   plannerMaxTokens: 2000,
   reviewerMaxTokens: 1000,
+  workerBackend: "remote-realtime",
   enableLegacyTools: false,
 };
 
@@ -114,6 +115,7 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     plannerModel: (config as any).plannerModel,
     realtimeModel: (config as any).realtimeModel,
     workerModel: (config as any).workerModel,
+    workerBackend: (config as any).workerBackend ?? "remote-realtime",
     memoryV3Endpoint: (config as any).memoryV3Endpoint,
     routerMaxTokens: (config as any).routerMaxTokens ?? 500,
     plannerMaxTokens: (config as any).plannerMaxTokens ?? 2000,

@@ -432,6 +432,8 @@ async function executeTask(
   const reviewModel = pluginConfig.reviewModel ?? "codex";
   // 2026-04-04 unification: all coding work (tier 1+) routes through the realtime worker.
   // The Claude SDK subagent / sessionManager worker paths are deprecated for coding tasks.
+  // Phase 1 backend split only adds the workerBackend seam in src/backend/* and config.
+  // executeTask intentionally stays on the current direct realtime path until phase 2 dispatch migration.
   const useRealtimeWorker = plan.tier >= 1;
   const reviewerTarget = resolveReviewerExecutionTarget(
     reviewModel,

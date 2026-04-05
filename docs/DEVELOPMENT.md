@@ -8,6 +8,12 @@ openclaw-harness/
 ├── openclaw.plugin.json
 ├── package.json
 ├── src/
+│   ├── backend/
+│   │   ├── factory.ts
+│   │   ├── local-cc.ts
+│   │   ├── remote-realtime.ts
+│   │   ├── types.ts
+│   │   └── index.ts
 │   ├── checkpoint.ts
 │   ├── planner.ts
 │   ├── review-loop.ts
@@ -39,6 +45,12 @@ openclaw-harness/
 - `src/router.ts`
 - `src/planner.ts`
 
+### Backend seam definitions
+- `src/backend/*`
+- `src/types.ts`
+- `src/shared.ts`
+- `openclaw.plugin.json`
+
 ### Review / fix loop behavior
 - `src/review-loop.ts`
 - `src/tools/harness-execute.ts`
@@ -68,6 +80,11 @@ openclaw-harness/
 - embedded caller-agent plan review
 - local sync-back before Codex review
 - completed realtime worker results recover on resume
+
+### Backend migration note
+- phase 1 adds `workerBackend` config + `src/backend/*` seam only
+- runtime dispatch still stays on the current realtime worker path
+- later phases will move execution dispatch onto the backend factory
 
 ### Planner behavior
 - planner is deterministic; do not assume a hidden model call here
