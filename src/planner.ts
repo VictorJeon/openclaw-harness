@@ -1,5 +1,5 @@
 import type { HarnessPlan, TaskSpec, Tier, PlannerMetadata } from "./types";
-import { pluginConfig, sessionManager } from "./shared";
+import { getSessionManager, pluginConfig } from "./shared";
 
 /**
  * Planner: decompose a request into concrete tasks with acceptance criteria.
@@ -449,6 +449,7 @@ function formatPlannerFailures(failures: string[]): string | undefined {
 }
 
 async function runPlannerWithSession(input: PlannerRunInput): Promise<PlannerRunResult> {
+  const sessionManager = getSessionManager();
   if (!sessionManager) {
     throw new Error("SessionManager not available for model-backed planner");
   }
@@ -542,7 +543,7 @@ async function waitForPlannerOutput(sessionId: string): Promise<string> {
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWaitMs) {
-    const session = sessionManager?.get(sessionId);
+    const session = getSessionManager()?.get(sessionId);
     if (!session) return "";
 
     if (session.status === "completed" || session.status === "failed" || session.status === "killed") {
@@ -552,7 +553,7 @@ async function waitForPlannerOutput(sessionId: string): Promise<string> {
     await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
-  sessionManager?.kill(sessionId);
+  getSessionManager()?.kill(sessionId);
   return "";
 }
 

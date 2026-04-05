@@ -3,14 +3,16 @@ import type { SessionManager, SessionMetrics } from "./session-manager";
 import type { NotificationRouter } from "./notifications";
 import type { PluginConfig } from "./types";
 
-export let sessionManager: SessionManager | null = null;
-export let notificationRouter: NotificationRouter | null = null;
+interface HarnessGlobalState {
+  sessionManager: SessionManager | null;
+  notificationRouter: NotificationRouter | null;
+  pluginConfig: PluginConfig;
+  pluginRuntime: any;
+}
 
-/**
- * Plugin config — populated at service start from api.getConfig().
- * All modules should read from this instead of using hardcoded constants.
- */
-export let pluginConfig: PluginConfig = {
+const HARNESS_GLOBAL_KEY = "__openclawHarnessGlobalState__";
+
+const DEFAULT_PLUGIN_CONFIG: PluginConfig = {
   maxSessions: 5,
   defaultBudgetUsd: 5,
   idleTimeoutMinutes: 30,
@@ -23,6 +25,59 @@ export let pluginConfig: PluginConfig = {
   reviewerMaxTokens: 1000,
   enableLegacyTools: false,
 };
+
+function cloneDefaultPluginConfig(): PluginConfig {
+  return { ...DEFAULT_PLUGIN_CONFIG };
+}
+
+function getHarnessState(): HarnessGlobalState {
+  const globalState = globalThis as typeof globalThis & {
+    [HARNESS_GLOBAL_KEY]?: HarnessGlobalState;
+  };
+
+  if (!globalState[HARNESS_GLOBAL_KEY]) {
+    globalState[HARNESS_GLOBAL_KEY] = {
+      sessionManager: null,
+      notificationRouter: null,
+      pluginConfig: cloneDefaultPluginConfig(),
+      pluginRuntime: null,
+    };
+  }
+
+  return globalState[HARNESS_GLOBAL_KEY]!;
+}
+
+export let sessionManager: SessionManager | null = getHarnessState().sessionManager;
+export let notificationRouter: NotificationRouter | null = getHarnessState().notificationRouter;
+
+/**
+ * Plugin config — populated at service start from api.getConfig().
+ * All modules should read from this instead of using hardcoded constants.
+ */
+export const pluginConfig: PluginConfig = new Proxy({} as PluginConfig, {
+  get(_target, prop) {
+    return (getHarnessState().pluginConfig as any)[prop];
+  },
+  set(_target, prop, value) {
+    (getHarnessState().pluginConfig as any)[prop] = value;
+    return true;
+  },
+  ownKeys() {
+    return Reflect.ownKeys(getHarnessState().pluginConfig);
+  },
+  getOwnPropertyDescriptor(_target, prop) {
+    return {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: (getHarnessState().pluginConfig as any)[prop],
+    };
+  },
+});
+
+export function getPluginConfig(): PluginConfig {
+  return getHarnessState().pluginConfig;
+}
 
 export function setPluginConfig(config: Partial<PluginConfig>): void {
   // Expand environment variables in agentChannels keys.
@@ -41,7 +96,7 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     agentChannels = expanded;
   }
 
-  pluginConfig = {
+  getHarnessState().pluginConfig = {
     maxSessions: config.maxSessions ?? 5,
     defaultBudgetUsd: config.defaultBudgetUsd ?? 5,
     defaultModel: config.defaultModel,
@@ -68,7 +123,7 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
 }
 
 export function isLegacyToolsEnabled(): boolean {
-  return pluginConfig.enableLegacyTools ?? true;
+  return getPluginConfig().enableLegacyTools ?? true;
 }
 
 export function formatLegacyToolsDisabledMessage(entrypoint: string): string {
@@ -97,22 +152,30 @@ export function legacyCommandDisabledResult(commandName: string): { text: string
 }
 
 export function setSessionManager(sm: SessionManager | null): void {
+  getHarnessState().sessionManager = sm;
   sessionManager = sm;
 }
 
+export function getSessionManager(): SessionManager | null {
+  return getHarnessState().sessionManager;
+}
+
 export function setNotificationRouter(nr: NotificationRouter | null): void {
+  getHarnessState().notificationRouter = nr;
   notificationRouter = nr;
 }
 
-// --- Runtime reference (for subagent.run / ACP access from plugin code) ---
-let _pluginRuntime: any = null;
+export function getNotificationRouter(): NotificationRouter | null {
+  return getHarnessState().notificationRouter;
+}
 
+// --- Runtime reference (for subagent.run / ACP access from plugin code) ---
 export function setPluginRuntime(rt: any): void {
-  _pluginRuntime = rt;
+  getHarnessState().pluginRuntime = rt;
 }
 
 export function getPluginRuntime(): any {
-  return _pluginRuntime;
+  return getHarnessState().pluginRuntime;
 }
 
 /**
@@ -148,7 +211,7 @@ export function resolveOriginChannel(ctx: any, explicitChannel?: string): string
     return String(ctx.channelId);
   }
   // Log what we got for debugging
-  const fallback = pluginConfig.fallbackChannel ?? "unknown";
+  const fallback = getPluginConfig().fallbackChannel ?? "unknown";
   console.log(`[resolveOriginChannel] Could not resolve channel from ctx keys: ${ctx ? Object.keys(ctx).join(", ") : "null"}, using fallback=${fallback}`);
   return fallback;
 }
@@ -191,8 +254,9 @@ export function resolveAgentId(workdir: string): string | undefined {
  * Returns undefined if no match is found.
  */
 export function resolveAgentChannel(workdir: string): string | undefined {
-  console.log(`[resolveAgentChannel] workdir=${workdir}, agentChannels=${JSON.stringify(pluginConfig.agentChannels)}`);
-  const mapping = pluginConfig.agentChannels;
+  const config = getPluginConfig();
+  console.log(`[resolveAgentChannel] workdir=${workdir}, agentChannels=${JSON.stringify(config.agentChannels)}`);
+  const mapping = config.agentChannels;
   if (!mapping) return undefined;
 
   const normalise = (p: string) => p.replace(/\/+$/, "");
@@ -306,8 +370,9 @@ export function formatStats(metrics: SessionMetrics): string {
       : 0;
 
   // Currently running sessions (live count from sessionManager)
-  const running = sessionManager
-    ? sessionManager.list("running").length
+  const activeSessionManager = getSessionManager();
+  const running = activeSessionManager
+    ? activeSessionManager.list("running").length
     : 0;
 
   const { completed, failed, killed } = metrics.sessionsByStatus;

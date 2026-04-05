@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { homedir, tmpdir } from "os";
 import { basename, join, relative, resolve } from "path";
 import { Type } from "@sinclair/typebox";
-import { sessionManager, pluginConfig, getPluginRuntime } from "../shared";
+import { getSessionManager, pluginConfig, getPluginRuntime } from "../shared";
 import { classifyRequest } from "../router";
 import { buildPlan, buildModelPlan, searchMemory } from "../planner";
 import {
@@ -95,7 +95,8 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       ),
     }),
     async execute(_id: string, params: any) {
-      if (!sessionManager) {
+      const activeSessionManager = getSessionManager();
+      if (!activeSessionManager) {
         return {
           isError: true,
           content: [{
@@ -313,6 +314,15 @@ interface EmbeddedPlanReviewResult {
   round: number;
 }
 
+function requireHarnessSessionManager() {
+  const activeSessionManager = getSessionManager();
+  if (!activeSessionManager) {
+    throw new Error("SessionManager not initialized. The harness service must be running.");
+  }
+
+  return activeSessionManager;
+}
+
 async function executePlan(
   plan: HarnessPlan,
   workdir: string,
@@ -346,7 +356,7 @@ async function executePlan(
     let i = 0;
     while (i < tasksToRun.length) {
       // Wait for at least one slot before spawning
-      const hasSlot = await sessionManager!.waitForSlot();
+      const hasSlot = await requireHarnessSessionManager().waitForSlot();
       if (!hasSlot) {
         // Timeout — push remaining as errors
         for (let j = i; j < tasksToRun.length; j++) {
@@ -364,7 +374,7 @@ async function executePlan(
       }
 
       // Compute batch size from current availability (reserve half for review/fix)
-      const batchSize = Math.max(1, Math.floor(sessionManager!.availableSlots() / 2));
+      const batchSize = Math.max(1, Math.floor(requireHarnessSessionManager().availableSlots() / 2));
       const batch = tasksToRun.slice(i, i + batchSize);
       const batchPromises = batch.map((task) =>
         executeTask(task, plan, workdir, budgetPerTask, ctx, checkpoint).catch((err: any) => ({
@@ -415,6 +425,7 @@ async function executeTask(
   ctx: OpenClawPluginToolContext,
   checkpoint: CheckpointData,
 ): Promise<TaskExecutionResult> {
+  const activeSessionManager = requireHarnessSessionManager();
   // realtimeModel is the preferred config key for tier 1+ Claude realtime
   // workers. workerModel remains as a legacy fallback for compatibility.
   const workerModel = pluginConfig.realtimeModel ?? pluginConfig.workerModel ?? "claude";
@@ -495,7 +506,7 @@ async function executeTask(
     } else {
       // === Fallback: sessionManager.spawn (CC PTY) — only reachable for tier 0 edge cases ===
       console.warn(`[harness] Fallback to sessionManager.spawn (tier 0 / no realtime)`);
-      const workerSession = sessionManager!.spawn({
+      const workerSession = activeSessionManager.spawn({
         prompt: workerPrompt,
         name: `harness-${plan.id}-${task.id}`,
         workdir,
@@ -718,7 +729,7 @@ async function executeTask(
         console.warn(`[harness] Fix fallback via sessionManager.spawn: task=${task.id}, loop=${reviewLoop.currentLoop}`);
         const fixBudget = Math.min(perPhaseBudget, remainingBudget);
         remainingBudget -= fixBudget;
-        const fixSession = sessionManager!.spawn({
+        const fixSession = activeSessionManager.spawn({
           prompt: action.fixPrompt,
           name: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
           workdir,
@@ -1757,12 +1768,13 @@ async function cleanupHarnessSubagentSessions(
  * Wait for a session to reach terminal state and return status + output.
  */
 async function waitForSessionEnd(sessionId: string): Promise<SessionCompletion> {
+  const activeSessionManager = requireHarnessSessionManager();
   const maxWaitMs = 10 * 60 * 1000; // 10 minutes max
   const pollIntervalMs = 3000;
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWaitMs) {
-    const session = sessionManager!.get(sessionId);
+    const session = activeSessionManager.get(sessionId);
     if (!session) {
       return { status: "failed", output: "", error: "Session disappeared" };
     }
@@ -1780,7 +1792,7 @@ async function waitForSessionEnd(sessionId: string): Promise<SessionCompletion> 
 
   console.warn(`[harness] Timeout waiting for session ${sessionId}`);
   // Kill the timed-out session
-  sessionManager!.kill(sessionId);
+  activeSessionManager.kill(sessionId);
   return { status: "timeout", output: "", error: "Session timed out after 10 minutes" };
 }
 

@@ -198,3 +198,10 @@ export function register(api: any) {
     },
   });
 }
+
+export default {
+  id: "openclaw-harness",
+  name: "OpenClaw Harness",
+  description: "Plan-Work-Review loop for coding tasks. Routes requests by complexity, dispatches workers, cross-model review with gap detection.",
+  register,
+};

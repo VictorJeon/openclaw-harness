@@ -1,4 +1,4 @@
-import { sessionManager, pluginConfig, formatSessionListing, formatDuration, formatStats, resolveOriginChannel } from "./shared";
+import { getSessionManager, pluginConfig, formatSessionListing, formatDuration, formatStats, resolveOriginChannel } from "./shared";
 
 /**
  * Task 17 — Gateway RPC methods
@@ -17,6 +17,7 @@ export function registerGatewayMethods(api: any): void {
 
   // ── claude-code.sessions ────────────────────────────────────────
   api.registerGatewayMethod("claude-code.sessions", ({ respond, params }: any) => {
+    const sessionManager = getSessionManager();
     if (!sessionManager) {
       return respond(false, { error: "SessionManager not initialized" });
     }
@@ -47,6 +48,7 @@ export function registerGatewayMethods(api: any): void {
 
   // ── claude-code.launch ──────────────────────────────────────────
   api.registerGatewayMethod("claude-code.launch", ({ respond, params }: any) => {
+    const sessionManager = getSessionManager();
     if (!sessionManager) {
       return respond(false, { error: "SessionManager not initialized" });
     }
@@ -84,6 +86,7 @@ export function registerGatewayMethods(api: any): void {
 
   // ── claude-code.kill ────────────────────────────────────────────
   api.registerGatewayMethod("claude-code.kill", ({ respond, params }: any) => {
+    const sessionManager = getSessionManager();
     if (!sessionManager) {
       return respond(false, { error: "SessionManager not initialized" });
     }
@@ -119,6 +122,7 @@ export function registerGatewayMethods(api: any): void {
 
   // ── claude-code.output ──────────────────────────────────────────
   api.registerGatewayMethod("claude-code.output", ({ respond, params }: any) => {
+    const sessionManager = getSessionManager();
     if (!sessionManager) {
       return respond(false, { error: "SessionManager not initialized" });
     }
@@ -152,6 +156,7 @@ export function registerGatewayMethods(api: any): void {
 
   // ── claude-code.stats ───────────────────────────────────────────
   api.registerGatewayMethod("claude-code.stats", ({ respond, params }: any) => {
+    const sessionManager = getSessionManager();
     if (!sessionManager) {
       return respond(false, { error: "SessionManager not initialized" });
     }
