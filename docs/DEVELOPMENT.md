@@ -71,20 +71,23 @@ openclaw-harness/
 ## Current implementation notes
 
 ### Tier 1
-- `claude-realtime.sh` worker on Hetzner
+- default: `claude-realtime.sh` worker on Hetzner
+- opt-in: local Claude Code CLI worker via `workerBackend="local-cc"`
 - Codex CLI review
-- realtime follow-up fixes continue in same worker session
+- remote-realtime follow-up fixes continue in same worker session
+- local-cc follow-up fixes rerun a fresh local Claude CLI round with persisted `jobId` state
 
 ### Tier 2
-- same `claude-realtime.sh` worker path as Tier 1
+- same backend split as Tier 1
 - embedded caller-agent plan review
-- local sync-back before Codex review
+- remote-realtime sync-back before Codex review
 - completed realtime worker results recover on resume
+- local-cc state lives under `/tmp/openclaw-harness-local-cc/...`
 
 ### Backend migration note
-- phase 1 adds `workerBackend` config + `src/backend/*` seam only
-- runtime dispatch still stays on the current realtime worker path
-- later phases will move execution dispatch onto the backend factory
+- runtime dispatch now flows through `src/backend/*` for tier 1+
+- default backend remains `remote-realtime`
+- `local-cc` is implemented as an opt-in local Claude Code CLI lane
 
 ### Planner behavior
 - planner is deterministic; do not assume a hidden model call here
@@ -118,7 +121,8 @@ When changing harness behavior, prefer direct proof over inference:
 
 Typical smoke patterns:
 - **tier 1**: small repo + realtime worker launch + Codex review + one follow-up fix
-- **tier 2**: realtime repo + embedded plan review + same-session follow-up + final Codex review
+- **tier 1 local-cc**: small repo + local Claude CLI worker + Codex review + one follow-up fix
+- **tier 2**: backend-selected worker + embedded plan review + follow-up + final Codex review
 
 ---
 

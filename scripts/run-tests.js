@@ -567,6 +567,247 @@ function testFindRecoverableCheckpointMatchesRequestAndWorkdir() {
   }
 }
 
+async function testLocalCcBackendReusesCompletedExecuteOutput() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-work-"));
+  const jobId = `test-local-cc-execute-${Date.now()}`;
+  let calls = 0;
+
+  const context = {
+    task: {
+      id: "task-1",
+      title: "Implement local backend",
+      scope: "src/backend/local-cc.ts",
+      acceptanceCriteria: ["local-cc executes locally"],
+      agent: "claude",
+    },
+    plan: {
+      id: "plan-local-cc",
+      originalRequest: "Implement the local backend",
+      tasks: [],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    },
+    workdir,
+    ctx: {},
+    workerModel: "anthropic/claude-sonnet-4-6",
+    jobId,
+  };
+
+  localCc.__setLocalCcCommandExecutorForTests(async () => {
+    calls++;
+    return {
+      exitCode: 0,
+      stdout: [
+        "Summary:",
+        "Implemented the local backend.",
+        "",
+        "Files changed:",
+        "- src/backend/local-cc.ts",
+        "- src/tools/harness-execute.ts",
+        "",
+        "Tests run:",
+        "3 tests passed",
+        "",
+        "Warnings:",
+        "- warning: review remaining edge cases",
+      ].join("\n"),
+      stderr: "",
+    };
+  });
+
+  try {
+    const first = await localCc.localCcBackend.executeWorker(context);
+    const second = await localCc.localCcBackend.executeWorker(context);
+    const state = localCc.readLocalCcJobState(jobId);
+
+    assert.equal(calls, 1, "same jobId should reuse completed execute output");
+    assert.equal(first.status, "waiting");
+    assert.equal(second.status, "waiting");
+    assert.deepEqual(first.workerResult.filesChanged, [
+      "src/backend/local-cc.ts",
+      "src/tools/harness-execute.ts",
+    ]);
+    assert.equal(first.workerResult.testsRun, 3);
+    assert.deepEqual(first.workerResult.warnings, [
+      "- warning: review remaining edge cases",
+    ]);
+    assert.equal(first.stateDir, localCc.getLocalCcStateDir(jobId));
+    assert.ok(!first.stateDir.startsWith(resolve(workdir) + "/"), "state dir must live outside the user repo");
+    assert.ok(state, "expected persisted local-cc state");
+    assert.equal(state.status, "waiting");
+    assert.equal(state.rounds.length, 1);
+    assert.equal(state.rounds[0].kind, "execute");
+    assert.equal(state.rounds[0].status, "completed");
+  } finally {
+    localCc.__resetLocalCcCommandExecutorForTests();
+    rmSync(localCc.getLocalCcStateDir(jobId), { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+async function testLocalCcBackendReusesContinueOutputAndFinalizes() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-followup-"));
+  const jobId = `test-local-cc-continue-${Date.now()}`;
+  let calls = 0;
+
+  const context = {
+    task: {
+      id: "task-2",
+      title: "Address review feedback",
+      scope: "src/backend/local-cc.ts",
+      acceptanceCriteria: ["review feedback is applied"],
+      agent: "claude",
+    },
+    plan: {
+      id: "plan-local-cc-followup",
+      originalRequest: "Implement local backend and fix review gaps",
+      tasks: [],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    },
+    workdir,
+    ctx: {},
+    workerModel: "sonnet",
+    jobId,
+  };
+
+  localCc.__setLocalCcCommandExecutorForTests(async () => {
+    calls++;
+    if (calls === 1) {
+      return {
+        exitCode: 0,
+        stdout: [
+          "Summary:",
+          "Initial implementation complete.",
+          "",
+          "Files changed:",
+          "- src/backend/local-cc.ts",
+          "",
+          "Tests run:",
+          "1 test passed",
+          "",
+          "Warnings:",
+          "- warning: add state reuse coverage",
+        ].join("\n"),
+        stderr: "",
+      };
+    }
+
+    return {
+      exitCode: 0,
+      stdout: [
+        "Summary:",
+        "Addressed reviewer feedback and added state reuse coverage.",
+        "",
+        "Files changed:",
+        "- src/backend/local-cc.ts",
+        "- scripts/run-tests.js",
+        "",
+        "Tests run:",
+        "2 tests passed",
+        "",
+        "Warnings:",
+      ].join("\n"),
+      stderr: "",
+    };
+  });
+
+  try {
+    await localCc.localCcBackend.executeWorker(context);
+    const feedback = "Add focused coverage for jobId state reuse.";
+    const firstContinue = await localCc.localCcBackend.continueWorker(context, feedback);
+    const secondContinue = await localCc.localCcBackend.continueWorker(context, feedback);
+    const reusedExecute = await localCc.localCcBackend.executeWorker(context);
+    const final = await localCc.localCcBackend.finalizeWorker(context);
+    const state = localCc.readLocalCcJobState(jobId);
+
+    assert.equal(calls, 2, "continueWorker should reuse the completed follow-up round for the same feedback");
+    assert.equal(firstContinue.status, "waiting");
+    assert.equal(secondContinue.status, "waiting");
+    assert.equal(reusedExecute.status, "waiting");
+    assert.deepEqual(firstContinue.workerResult.filesChanged, [
+      "src/backend/local-cc.ts",
+      "scripts/run-tests.js",
+    ]);
+    assert.deepEqual(reusedExecute.workerResult.filesChanged, [
+      "src/backend/local-cc.ts",
+      "scripts/run-tests.js",
+    ]);
+    assert.equal(final.status, "done");
+    assert.equal(final.workerResult.testsRun, 2);
+    assert.ok(state, "expected persisted local-cc state");
+    assert.equal(state.status, "done");
+    assert.equal(state.rounds.length, 2);
+    assert.equal(state.rounds[1].kind, "continue");
+    assert.equal(state.rounds[1].status, "completed");
+    assert.ok(state.rounds[1].feedbackHash, "expected persisted feedback hash for continue reuse");
+  } finally {
+    localCc.__resetLocalCcCommandExecutorForTests();
+    rmSync(localCc.getLocalCcStateDir(jobId), { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+async function testLocalCcBackendReportsMissingCliClearly() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-missing-cli-"));
+  const jobId = `test-local-cc-missing-cli-${Date.now()}`;
+
+  const context = {
+    task: {
+      id: "task-3",
+      title: "Fail clearly when claude CLI is missing",
+      scope: "src/backend/local-cc.ts",
+      acceptanceCriteria: ["errors are clear"],
+      agent: "claude",
+    },
+    plan: {
+      id: "plan-local-cc-missing-cli",
+      originalRequest: "Surface a clear local-cc CLI error",
+      tasks: [],
+      mode: "solo",
+      estimatedComplexity: "low",
+      tier: 1,
+    },
+    workdir,
+    ctx: {},
+    workerModel: "claude",
+    jobId,
+  };
+
+  localCc.__setLocalCcCommandExecutorForTests(async () => ({
+    exitCode: -1,
+    stdout: "",
+    stderr: "",
+    error: 'Claude Code CLI not found on PATH. Install the local `claude` CLI or switch workerBackend to "remote-realtime".',
+  }));
+
+  try {
+    const result = await localCc.localCcBackend.executeWorker(context);
+    const state = localCc.readLocalCcJobState(jobId);
+
+    assert.equal(result.status, "error");
+    assert.equal(result.workerResult, null);
+    assert.match(result.error, /Claude Code CLI not found on PATH/);
+    assert.ok(state, "expected persisted local-cc state");
+    assert.equal(state.status, "error");
+    assert.equal(state.rounds.length, 1);
+    assert.equal(state.rounds[0].status, "failed");
+    assert.match(state.lastError, /switch workerBackend to "remote-realtime"/);
+  } finally {
+    localCc.__resetLocalCcCommandExecutorForTests();
+    rmSync(localCc.getLocalCcStateDir(jobId), { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
@@ -586,6 +827,9 @@ const tests = [
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],
   ["checkpoint finds recoverable run through symlinked workdir alias", testFindRecoverableCheckpointMatchesSymlinkedWorkdir],
+  ["local-cc backend reuses completed execute output by jobId", testLocalCcBackendReusesCompletedExecuteOutput],
+  ["local-cc backend reuses continue output and finalizes cleanly", testLocalCcBackendReusesContinueOutputAndFinalizes],
+  ["local-cc backend reports missing claude CLI clearly", testLocalCcBackendReportsMissingCliClearly],
 ];
 
 (async () => {

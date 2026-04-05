@@ -22,6 +22,7 @@ Verified in live smoke runs:
 - realtime follow-up fixes continue in the **same Claude session** via `--resume`
 - local sync-back materializes as **uncommitted worktree diff** (not merge commits)
 - single-feature workflow collapse still works
+- default backend remains `remote-realtime`; `workerBackend="local-cc"` is now available as an opt-in local lane
 
 Recent implementation commits:
 - `a3bb1f0` — tier 1+ unify on realtime worker path
@@ -36,19 +37,21 @@ Recent implementation commits:
 | Tier | When used | Worker | Reviewer |
 |------|-----------|--------|----------|
 | **0** | tiny/local-safe edits | caller agent direct | none |
-| **1** | normal coding tasks | `claude-realtime.sh` on Hetzner | Codex CLI |
-| **2** | complex / high-risk / multi-step coding | same realtime worker path | caller-agent plan review + Codex CLI |
+| **1** | normal coding tasks | default: `claude-realtime.sh` on Hetzner; opt-in: local Claude Code CLI via `workerBackend="local-cc"` | Codex CLI |
+| **2** | complex / high-risk / multi-step coding | same backend split as Tier 1 | caller-agent plan review + Codex CLI |
 
 ### Tier 1
-- worker runs through `claude-realtime.sh`
+- default worker runs through `claude-realtime.sh`
+- `workerBackend="local-cc"` runs one-shot local Claude Code CLI rounds in the local workdir and persists state under `/tmp/openclaw-harness-local-cc/<jobId>`
 - review loop can request fixes
-- follow-up fixes continue in the **same Claude session** via realtime `jobId` + `session_id`
+- remote-realtime follow-up fixes continue in the **same Claude session** via realtime `jobId` + `session_id`
+- local-cc follow-up fixes rerun a fresh local Claude CLI round with persisted `jobId` state reuse
 
 ### Tier 2
-- worker runs through the same `claude-realtime.sh` path as Tier 1
+- worker uses the configured tier-1 backend (`remote-realtime` by default, `local-cc` when opted in)
 - plan review is produced by the **calling agent directly** (embedded runtime path)
-- repo is synced back before Codex CLI review
-- realtime follow-up fixes continue in the same worker session
+- remote-realtime syncs the repo back before Codex CLI review
+- local-cc works directly in the local workdir, so no remote sync step is involved
 
 ---
 
@@ -78,7 +81,7 @@ Useful parameters:
 Typical flow:
 1. deterministic router classifies complexity
 2. model-backed planner builds the task list (Opus primary, Sonnet fallback)
-3. realtime worker executes for tier 1+
+3. selected worker backend executes for tier 1+ (`remote-realtime` by default, optional `local-cc` locally)
 4. Codex CLI reviewer checks gaps
 5. fix loop runs if needed
 6. structured result returned

@@ -38,8 +38,8 @@ request
 
 3. **Worker execution** (`src/tools/harness-execute.ts`)
    - tier 0: caller agent direct
-   - tier 1: `claude-realtime.sh` on Hetzner (default coding worker)
-   - tier 2: the same realtime worker path, with tier-2 planning / decomposition semantics
+   - tier 1: backend-selected coding worker (`remote-realtime` by default, optional `local-cc`)
+   - tier 2: the same backend selection, with tier-2 planning / decomposition semantics
 
 4. **Review loop** (`src/review-loop.ts` + `src/tools/harness-execute.ts`)
    - reviewer checks worker output
@@ -53,43 +53,53 @@ request
 
 ---
 
-## Worker backend seam (phase 1)
+## Worker backends
 
-The harness is moving toward a **one-repo / two-backend** structure:
+The harness supports a **one-repo / two-backend** structure:
 
 - `remote-realtime` = current default / stable lane
-- `local-cc` = future opt-in / public lane
+- `local-cc` = opt-in local Claude Code CLI lane
 
-Phase 1 adds only the seam:
-- `workerBackend` config/schema support
-- `src/backend/*` backend modules and factory
-- docs describing the lane split
+Shared dispatch behavior:
+- `workerBackend` selects the tier 1+ worker lane
+- tier 0 remains unchanged and never enters backend dispatch
+- reviewer stays on Codex CLI for both backends
+- default backend remains `remote-realtime`
 
-Phase 1 does **not** change dispatch yet. `executeTask()` still uses the current direct realtime path until a later phase swaps execution over to the backend factory.
+`remote-realtime` specifics:
+- launches `claude-realtime.sh` on Hetzner
+- syncs completed work back locally before review
+- keeps follow-up fixes in the same remote worker session
+
+`local-cc` specifics:
+- launches the local `claude` CLI directly in the local workdir
+- uses one-shot Claude CLI runs for initial work and fix rounds
+- persists state under `/tmp/openclaw-harness-local-cc/<jobId>` so repeated calls can reuse completed output
 
 ## Tier model
 
 | Tier | Worker path | Review path |
 |------|-------------|-------------|
 | **0** | caller agent direct | none |
-| **1** | realtime Claude worker on Hetzner | Codex CLI reviewer |
-| **2** | realtime Claude worker on Hetzner | embedded caller-agent plan review + Codex CLI reviewer |
+| **1** | default: realtime Claude worker on Hetzner; opt-in: local Claude Code CLI | Codex CLI reviewer |
+| **2** | same backend split as Tier 1 | embedded caller-agent plan review + Codex CLI reviewer |
 
 ### Tier 1 details
 
 - used for normal coding tasks
-- worker runs through `claude-realtime.sh`
-- fix loops continue in the same realtime worker session
+- default worker runs through `claude-realtime.sh`
+- `workerBackend="local-cc"` runs one-shot local Claude CLI rounds in the local workdir
+- remote-realtime fix loops continue in the same realtime worker session
+- local-cc fix loops reuse persisted `jobId` state and rerun a fresh local Claude CLI round
 - reviewer runs through Codex CLI
 
 ### Tier 2 details
 
 - used for complex/high-risk/multi-step coding tasks
-- worker runs through the same `claude-realtime.sh` path as Tier 1
+- worker runs through the configured tier-1 backend
 - plan review is produced by the **calling agent directly** through embedded runtime review
-- feedback is written back to the realtime worker state dir
-- on completion or review-ready checkpoint, repo is synced back locally before review
-- follow-up fixes continue in the **same realtime worker session**
+- remote-realtime writes feedback back to the realtime worker state dir and syncs the repo before review
+- local-cc works directly in the local workdir and keeps its state entirely local
 
 ---
 

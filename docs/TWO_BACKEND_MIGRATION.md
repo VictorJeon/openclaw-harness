@@ -5,9 +5,11 @@
 Keep `openclaw-harness` as **one repo** while supporting two worker backends:
 
 - `remote-realtime` — current default / stable lane for Nova-internal use
-- `local-cc` — future opt-in / public lane for portable installs
+- `local-cc` — opt-in local lane for portable installs
 
-The immediate goal is to create a backend seam without changing runtime behavior.
+The immediate goal was to create the backend seam without changing runtime behavior.
+The current goal is to keep `remote-realtime` as the default while making
+`local-cc` usable for local-only execution.
 
 ## Backend lanes
 
@@ -18,9 +20,10 @@ The immediate goal is to create a backend seam without changing runtime behavior
 - must stay behavior-compatible during the migration
 
 ### `local-cc`
-- future local-first path
-- intended for local Claude Code CLI execution plus local review flows
-- opt-in only until the path is implemented and proven
+- local-first path
+- uses the local Claude Code CLI in the local workdir
+- keeps the existing local Codex reviewer flow
+- remains opt-in; it does not change the default backend
 
 ## Configuration
 
@@ -41,7 +44,7 @@ Default:
 
 ## Phase 1 scope
 
-Phase 1 adds only the seam:
+Phase 1 added only the seam:
 
 - config/schema support for `workerBackend`
 - shared type definitions for backend selection
@@ -62,12 +65,12 @@ Phase 2 connects `executeTask()` dispatch to the backend seam:
 
 - `WorkerBackendHandler` gains execution methods: `executeWorker`, `continueWorker`, `finalizeWorker`
 - `remote-realtime` implements these by delegating to the existing realtime helper functions
-- `local-cc` implements them as fail-safe stubs that throw a clear "not yet implemented" error
+- `local-cc` initially implemented them as fail-safe stubs that threw a clear "not yet implemented" error
 - `executeTask()` resolves a backend via `resolveWorkerBackend(pluginConfig)` for tier 1+ tasks
 - Tier 0 tasks are completely unaffected (they never enter backend dispatch)
 - Default backend remains `remote-realtime` — no config change required
 
-### Dispatch flow after phase 2
+### Dispatch flow
 
 ```
 executeTask(task, plan, ...)
@@ -80,20 +83,33 @@ executeTask(task, plan, ...)
 
 ### What happens with workerBackend=local-cc
 
-`resolveWorkerBackend()` returns the `localCcBackend` handler. Any execution method
-throws: `"local-cc worker backend is not yet implemented"`. The error is caught by
-`executeTask`'s existing error handler and reported as a structured task failure.
+`resolveWorkerBackend()` returns the `localCcBackend` handler.
+
+Current behavior:
+- `executeWorker()` runs a one-shot local `claude` CLI command in the local workdir
+- `continueWorker()` runs another one-shot local `claude` CLI command with reviewer feedback
+- `finalizeWorker()` marks the local job state done and returns the latest completed worker result
+- state is persisted under `/tmp/openclaw-harness-local-cc/<jobId>`
+- repeated calls with the same `jobId` reuse completed output instead of rerunning blindly
+- reviewer stays on the existing local Codex CLI path
+- tier 0 remains unchanged because it never enters backend dispatch
+
+## Phase 3 scope (completed in v1)
+
+- implement the real `local-cc` execution path
+- keep default backend = `remote-realtime`
+- keep reviewer on the existing local Codex path
+- add local `jobId` state reuse
+- keep tier 0 behavior unchanged
 
 ## Future phases
 
-### Phase 3
-- implement the real `local-cc` execution path
 - move realtime helper functions into `remote-realtime.ts` (currently they remain in `harness-execute.ts`)
-- add backend-specific validation and smoke coverage
+- broaden backend-specific smoke coverage
 - decide when/if the public default should move
 
 ## Review rule
 
 Phase-1 rule: if changes alter runtime behavior, the seam is too large.
-Phase-2 rule: `remote-realtime` behavior must remain identical — the dispatch indirection
-must be transparent. Only `local-cc` selection should produce new (error) behavior.
+Phase-2/3 rule: `remote-realtime` behavior must remain identical — the dispatch indirection
+must be transparent for the default lane. Only `local-cc` selection should produce the new local behavior.

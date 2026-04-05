@@ -445,15 +445,13 @@ async function executeTask(
   // workers. workerModel remains as a legacy fallback for compatibility.
   const workerModel = pluginConfig.realtimeModel ?? pluginConfig.workerModel ?? "claude";
   const reviewModel = pluginConfig.reviewModel ?? "codex";
-  // Phase 2 dispatch: tier 1+ tasks resolve their backend through the factory
-  // instead of inline selection. Tier 0 still falls through to sessionManager.spawn.
+  // Tier 1+ tasks resolve their worker backend through the factory.
+  // Tier 0 still falls through to sessionManager.spawn.
   const useBackendDispatch = plan.tier >= 1;
   const backend = useBackendDispatch ? resolveWorkerBackend(pluginConfig) : null;
   const isRealtimeBackend = backend?.name === "remote-realtime";
 
-  // Fail fast if the resolved backend is not available (e.g. local-cc stub).
-  // This ensures the stub's error message is returned verbatim to the caller
-  // without passing through any realtime-specific recovery or formatting.
+  // Fail fast if the resolved backend reports itself unavailable.
   if (backend && !backend.available()) {
     updateTaskStatus(checkpoint, task.id, "failed", workdir);
     return {
@@ -493,8 +491,9 @@ async function executeTask(
     let workerResult: WorkerResult | null = null;
 
     if (useBackendDispatch && backend) {
-      // Phase 2: tier 1+ coding work dispatches through the resolved backend.
-      // Checkpoint recovery only applies to remote-realtime (state dir on disk)
+      // Tier 1+ coding work dispatches through the resolved backend.
+      // remote-realtime recovers completed output here; local-cc reuses its
+      // own jobId-backed state internally inside the backend implementation.
       const existingJobId = checkpoint.sessions[task.id]?.worker ?? "";
       const recoveredResult = isRealtimeBackend && existingJobId
         ? recoverCompletedRealtimeWorkerResult(task.id, existingJobId)
