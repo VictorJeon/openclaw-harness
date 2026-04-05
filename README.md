@@ -114,11 +114,13 @@ For new automated coding tasks, prefer **`harness_execute`**.
 ```bash
 git clone https://github.com/VictorJeon/openclaw-harness-private.git ~/.openclaw/extensions/openclaw-harness
 cd ~/.openclaw/extensions/openclaw-harness
+git checkout v0.2.0
 npm install
 npm run build
 ```
 
-For stable rollouts, pin to a known-good commit instead of tracking `main` blindly (current recommended pin: `8c82e24`).
+For stable rollouts, pin to a known-good release instead of tracking `main` blindly.
+Current Nana/local-cc-ready release: **`v0.2.0`**.
 
 Then enable it in `~/.openclaw/openclaw.json`:
 
@@ -133,6 +135,7 @@ Then enable it in `~/.openclaw/openclaw.json`:
           plannerModel: "anthropic/claude-opus-4-6",
           reviewModel: "openai-codex/gpt-5.4",
           realtimeModel: "anthropic/claude-opus-4-6",
+          workerBackend: "remote-realtime",
           enableLegacyTools: false
         }
       }
@@ -142,6 +145,36 @@ Then enable it in `~/.openclaw/openclaw.json`:
 ```
 
 After config changes, restart the gateway.
+
+### Nana local-only (`workerBackend="local-cc"`)
+
+For Nana/local installs, keep the planner/reviewer local and opt into the local Claude Code worker lane:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "openclaw-harness": {
+        enabled: true,
+        config: {
+          operationMode: "delegate",
+          plannerModel: "anthropic/claude-opus-4-6",
+          reviewModel: "openai-codex/gpt-5.4",
+          workerBackend: "local-cc",
+          enableLegacyTools: false
+        }
+      }
+    }
+  }
+}
+```
+
+Requirements for `local-cc`:
+- `claude` must be available in the gateway runtime PATH
+- `codex` should also be available for the reviewer path
+- the plugin must be present under `~/.openclaw/extensions/openclaw-harness`
+- `plugins.allow` must include `openclaw-harness`
+- if you install outside the default extensions directory, add the parent directory to `plugins.load.paths`
 
 ## Local development
 
