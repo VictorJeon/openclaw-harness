@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { mkdtempSync, rmSync } = require("node:fs");
+const { mkdtempSync, rmSync, symlinkSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { basename, join, resolve } = require("node:path");
 const esbuild = require("esbuild");
@@ -460,6 +460,40 @@ function testCheckpointMarksFailedWhenTaskFailsEarly() {
   }
 }
 
+function testFindRecoverableCheckpointMatchesSymlinkedWorkdir() {
+  const { mod: checkpointMod, cleanup } = loadTsModule("src/checkpoint.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-real-"));
+  const aliasParent = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-link-"));
+  const aliasPath = join(aliasParent, "alias-workdir");
+
+  try {
+    symlinkSync(workdir, aliasPath, "dir");
+
+    const plan = {
+      id: "plan-test-recover-symlink",
+      originalRequest: "resume using symlink path",
+      tasks: [
+        { id: "task-1", title: "one", scope: "calc.py", acceptanceCriteria: ["a"], agent: "codex" },
+      ],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    };
+
+    const checkpoint = checkpointMod.initCheckpoint(plan, workdir, join(workdir, ".isolated-clone"));
+    checkpointMod.recordSession(checkpoint, "task-1", "worker", "job-symlink", workdir);
+    checkpointMod.updateTaskStatus(checkpoint, "task-1", "in-review", workdir, { reviewPassed: false });
+
+    const recovered = checkpointMod.findRecoverableCheckpoint("resume using symlink path", aliasPath);
+    assert.ok(recovered, "expected checkpoint match through symlink alias");
+    assert.equal(recovered.runId, "plan-test-recover-symlink");
+  } finally {
+    rmSync(aliasParent, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 function testFindRecoverableCheckpointMatchesRequestAndWorkdir() {
   const { mod: checkpointMod, cleanup } = loadTsModule("src/checkpoint.ts");
   const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-"));
@@ -513,8 +547,18 @@ function testFindRecoverableCheckpointMatchesRequestAndWorkdir() {
     const recovered = checkpointMod.findRecoverableCheckpoint("resume this exact request", workdir);
     assert.ok(recovered, "expected a recoverable checkpoint");
     assert.equal(recovered.runId, "plan-test-recover-match");
-    assert.equal(recovered.workdir, require("node:path").resolve(workdir));
-    assert.equal(recovered.executionWorkdir, require("node:path").resolve(isolatedExecDir));
+    const normalize = (value) => {
+      const resolved = require("node:path").resolve(value);
+      try {
+        return typeof require("node:fs").realpathSync.native === "function"
+          ? require("node:fs").realpathSync.native(resolved)
+          : require("node:fs").realpathSync(resolved);
+      } catch {
+        return resolved;
+      }
+    };
+    assert.equal(recovered.workdir, normalize(workdir));
+    assert.equal(recovered.executionWorkdir, normalize(isolatedExecDir));
   } finally {
     rmSync(workdir, { recursive: true, force: true });
     rmSync(otherWorkdir, { recursive: true, force: true });
@@ -541,6 +585,7 @@ const tests = [
   ["extractFilePaths captures root and nested repo files", testExtractFilePathsCapturesRootAndNestedFiles],
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],
+  ["checkpoint finds recoverable run through symlinked workdir alias", testFindRecoverableCheckpointMatchesSymlinkedWorkdir],
 ];
 
 (async () => {

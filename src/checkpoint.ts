@@ -1,6 +1,17 @@
-import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync } from "fs";
+import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, realpathSync } from "fs";
 import { join, resolve } from "path";
 import type { CheckpointData, HarnessPlan, TaskStatus, WorkerResult, ReviewResult } from "./types";
+
+function normalizeWorkdirPath(workdir: string): string {
+  const resolved = resolve(workdir);
+  try {
+    return typeof (realpathSync as any).native === "function"
+      ? (realpathSync as any).native(resolved)
+      : realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
 
 /**
  * Checkpoint: Task-level state persistence.
@@ -29,8 +40,8 @@ function checkpointPath(workdir: string, runId: string): string {
 export function initCheckpoint(plan: HarnessPlan, workdir: string, executionWorkdir: string = workdir): CheckpointData {
   const checkpoint: CheckpointData = {
     runId: plan.id,
-    workdir: resolve(workdir),
-    executionWorkdir: resolve(executionWorkdir),
+    workdir: normalizeWorkdirPath(workdir),
+    executionWorkdir: normalizeWorkdirPath(executionWorkdir),
     status: "running",
     plan,
     tasks: plan.tasks.map((t) => ({
@@ -159,7 +170,7 @@ export function getPendingTasks(checkpoint: CheckpointData): string[] {
 
 export function findRecoverableCheckpoint(request: string, workdir: string): CheckpointData | null {
   const checkpointsRoot = join("/tmp", "harness");
-  const normalizedWorkdir = resolve(workdir);
+  const normalizedWorkdir = normalizeWorkdirPath(workdir);
 
   try {
     if (!existsSync(checkpointsRoot)) return null;
@@ -178,7 +189,7 @@ export function findRecoverableCheckpoint(request: string, workdir: string): Che
       .filter((checkpoint): checkpoint is CheckpointData => checkpoint !== null)
       .filter((checkpoint) => checkpoint.status === "running")
       .filter((checkpoint) => checkpoint.plan?.originalRequest === request)
-      .filter((checkpoint) => checkpoint.workdir === normalizedWorkdir || checkpoint.executionWorkdir === normalizedWorkdir)
+      .filter((checkpoint) => normalizeWorkdirPath(checkpoint.workdir ?? "") === normalizedWorkdir || normalizeWorkdirPath(checkpoint.executionWorkdir ?? "") === normalizedWorkdir)
       .filter((checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0)
       .sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
 
