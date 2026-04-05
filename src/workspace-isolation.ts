@@ -66,8 +66,8 @@ function copyUntrackedFiles(repoRoot: string, cloneDir: string): void {
   }
 }
 
-function writeIsolationState(repoRoot: string, planId: string, executionWorkdir: string): string {
-  const statePath = join(repoRoot, ".openclaw-harness", "execution-workspaces", `${planId}.json`);
+function writeIsolationState(repoRoot: string, planId: string, executionWorkdir: string, cleanupRoot: string): string {
+  const statePath = join(cleanupRoot, "execution-workspaces", `${planId}.json`);
   mkdirSync(dirname(statePath), { recursive: true });
   writeFileSync(
     statePath,
@@ -116,7 +116,7 @@ export function prepareExecutionWorkspace(originalWorkdir: string, planId: strin
     // If nothing was staged after projection, keep the clone anyway.
   }
 
-  const statePath = writeIsolationState(repoRoot, planId, tempDir);
+  const statePath = writeIsolationState(repoRoot, planId, tempDir, tempRoot);
   return {
     originalWorkdir: resolvedWorkdir,
     executionWorkdir: tempDir,
