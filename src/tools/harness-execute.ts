@@ -10,6 +10,7 @@ import type { WorkerExecutionContext } from "../backend/types";
 import { classifyRequest } from "../router";
 import { buildPlan, buildModelPlan, searchMemory } from "../planner";
 import {
+  findRecoverableCheckpoint,
   getPendingTasks,
   initCheckpoint,
   loadCheckpoint,
@@ -111,6 +112,9 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       const workdir = params.workdir || ctx.workspaceDir || pluginConfig.defaultWorkdir || process.cwd();
       const mode: OperationMode = params.mode ?? pluginConfig.operationMode ?? "delegate";
       const maxBudgetUsd = params.max_budget_usd ?? pluginConfig.defaultBudgetUsd ?? 5;
+      const autoResumeCheckpoint = !params.approved_plan_id
+        ? findRecoverableCheckpoint(params.request, workdir)
+        : null;
 
       // Step 1: Route — classify request complexity
       const route = classifyRequest(params.request);
@@ -122,8 +126,9 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       const isRiskyConfig = isRiskyTier0(params.request); // evaluate independently of tier
 
       // If approved_plan_id provided, load and validate the persisted plan
+      let existingCheckpoint: CheckpointData | null = null;
       if (params.approved_plan_id) {
-        const existingCheckpoint = loadCheckpoint(params.approved_plan_id, workdir);
+        existingCheckpoint = loadCheckpoint(params.approved_plan_id, workdir);
         if (!existingCheckpoint) {
           return {
             isError: true,
@@ -144,9 +149,17 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
             }],
           };
         }
+      } else if (autoResumeCheckpoint) {
+        existingCheckpoint = autoResumeCheckpoint;
+      }
 
-        // Execute the approved plan directly
-        console.log(`[harness] Executing approved plan: ${params.approved_plan_id}`);
+      if (existingCheckpoint) {
+        // Execute the approved or auto-resumed plan directly
+        console.log(
+          params.approved_plan_id
+            ? `[harness] Executing approved plan: ${params.approved_plan_id}`
+            : `[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`,
+        );
         const plan = existingCheckpoint.plan;
         const runState = buildExecutionRunState(existingCheckpoint);
         if (runState.mode === "resumed" && existingCheckpoint.status !== "complete") {

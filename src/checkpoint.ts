@@ -1,5 +1,5 @@
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from "fs";
-import { join } from "path";
+import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync } from "fs";
+import { join, resolve } from "path";
 import type { CheckpointData, HarnessPlan, TaskStatus, WorkerResult, ReviewResult } from "./types";
 
 /**
@@ -29,6 +29,7 @@ function checkpointPath(workdir: string, runId: string): string {
 export function initCheckpoint(plan: HarnessPlan, workdir: string): CheckpointData {
   const checkpoint: CheckpointData = {
     runId: plan.id,
+    workdir: resolve(workdir),
     status: "running",
     plan,
     tasks: plan.tasks.map((t) => ({
@@ -154,3 +155,36 @@ export function getPendingTasks(checkpoint: CheckpointData): string[] {
     .filter((t) => t.status === "pending" || t.status === "in-progress")
     .map((t) => t.id);
 }
+
+export function findRecoverableCheckpoint(request: string, workdir: string): CheckpointData | null {
+  const checkpointsRoot = join("/tmp", "harness");
+  const normalizedWorkdir = resolve(workdir);
+
+  try {
+    if (!existsSync(checkpointsRoot)) return null;
+
+    const matches = readdirSync(checkpointsRoot)
+      .map((runId) => join(checkpointsRoot, runId, "checkpoint.json"))
+      .filter((path) => existsSync(path))
+      .map((path) => {
+        try {
+          const raw = readFileSync(path, "utf-8");
+          return JSON.parse(raw) as CheckpointData;
+        } catch {
+          return null;
+        }
+      })
+      .filter((checkpoint): checkpoint is CheckpointData => checkpoint !== null)
+      .filter((checkpoint) => checkpoint.status === "running")
+      .filter((checkpoint) => checkpoint.plan?.originalRequest === request)
+      .filter((checkpoint) => checkpoint.workdir === normalizedWorkdir)
+      .filter((checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0)
+      .sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
+
+    return matches[0] ?? null;
+  } catch (err: any) {
+    console.warn(`[checkpoint] Failed to search recoverable checkpoints: ${err?.message ?? String(err)}`);
+    return null;
+  }
+}
+

@@ -460,6 +460,66 @@ function testCheckpointMarksFailedWhenTaskFailsEarly() {
   }
 }
 
+function testFindRecoverableCheckpointMatchesRequestAndWorkdir() {
+  const { mod: checkpointMod, cleanup } = loadTsModule("src/checkpoint.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-"));
+  const otherWorkdir = mkdtempSync(join(tmpdir(), "openclaw-harness-recover-other-"));
+
+  try {
+    const matchingPlan = {
+      id: "plan-test-recover-match",
+      originalRequest: "resume this exact request",
+      tasks: [
+        { id: "task-1", title: "one", scope: "calc.py", acceptanceCriteria: ["a"], agent: "codex" },
+      ],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    };
+
+    const pendingOnlyPlan = {
+      id: "plan-test-recover-pending",
+      originalRequest: "resume this exact request",
+      tasks: [
+        { id: "task-1", title: "one", scope: "calc.py", acceptanceCriteria: ["a"], agent: "codex" },
+      ],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    };
+
+    const otherWorkdirPlan = {
+      id: "plan-test-recover-other",
+      originalRequest: "resume this exact request",
+      tasks: [
+        { id: "task-1", title: "one", scope: "calc.py", acceptanceCriteria: ["a"], agent: "codex" },
+      ],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    };
+
+    const matching = checkpointMod.initCheckpoint(matchingPlan, workdir);
+    checkpointMod.recordSession(matching, "task-1", "worker", "job-1", workdir);
+    checkpointMod.updateTaskStatus(matching, "task-1", "in-review", workdir, { reviewPassed: false });
+
+    checkpointMod.initCheckpoint(pendingOnlyPlan, workdir);
+
+    const other = checkpointMod.initCheckpoint(otherWorkdirPlan, otherWorkdir);
+    checkpointMod.recordSession(other, "task-1", "worker", "job-2", otherWorkdir);
+    checkpointMod.updateTaskStatus(other, "task-1", "in-review", otherWorkdir, { reviewPassed: false });
+
+    const recovered = checkpointMod.findRecoverableCheckpoint("resume this exact request", workdir);
+    assert.ok(recovered, "expected a recoverable checkpoint");
+    assert.equal(recovered.runId, "plan-test-recover-match");
+    assert.equal(recovered.workdir, require("node:path").resolve(workdir));
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    rmSync(otherWorkdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
@@ -477,6 +537,7 @@ const tests = [
   ["model planner uses JSON as primary parse path", testModelPlannerUsesJsonPrimary],
   ["extractFilePaths captures root and nested repo files", testExtractFilePathsCapturesRootAndNestedFiles],
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
+  ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],
 ];
 
 (async () => {

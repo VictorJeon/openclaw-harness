@@ -183,6 +183,7 @@ export interface ReviewResult {
 
 export interface CheckpointData {
   runId: string;
+  workdir?: string;
   status: "running" | "complete" | "failed" | "escalated";
   plan: HarnessPlan;
   tasks: Array<{
