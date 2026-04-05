@@ -5,7 +5,6 @@ import type { PluginConfig } from "./types";
 
 export let sessionManager: SessionManager | null = null;
 export let notificationRouter: NotificationRouter | null = null;
-export let pluginRuntime: any = null;
 
 /**
  * Plugin config — populated at service start from api.getConfig().
@@ -22,6 +21,7 @@ export let pluginConfig: PluginConfig = {
   routerMaxTokens: 500,
   plannerMaxTokens: 2000,
   reviewerMaxTokens: 1000,
+  enableLegacyTools: false,
 };
 
 export function setPluginConfig(config: Partial<PluginConfig>): void {
@@ -52,17 +52,47 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     permissionMode: config.permissionMode,
     agentChannels,
     maxAutoResponds: config.maxAutoResponds ?? 10,
-    enableLegacyTools: (config as any).enableLegacyTools ?? false,
     skipSafetyChecks: config.skipSafetyChecks,
     operationMode: (config as any).operationMode ?? "delegate",
     maxReviewLoops: (config as any).maxReviewLoops ?? 4,
     reviewModel: (config as any).reviewModel,
-    workerModel: (config as any).workerModel,
     plannerModel: (config as any).plannerModel,
+    realtimeModel: (config as any).realtimeModel,
+    workerModel: (config as any).workerModel,
     memoryV3Endpoint: (config as any).memoryV3Endpoint,
     routerMaxTokens: (config as any).routerMaxTokens ?? 500,
     plannerMaxTokens: (config as any).plannerMaxTokens ?? 2000,
     reviewerMaxTokens: (config as any).reviewerMaxTokens ?? 1000,
+    enableLegacyTools: config.enableLegacyTools ?? false,
+  };
+}
+
+export function isLegacyToolsEnabled(): boolean {
+  return pluginConfig.enableLegacyTools ?? true;
+}
+
+export function formatLegacyToolsDisabledMessage(entrypoint: string): string {
+  return [
+    `Legacy direct-session surface is disabled (enableLegacyTools=false).`,
+    `${entrypoint} is unavailable.`,
+    `Use harness_execute instead.`,
+  ].join(" ");
+}
+
+export function legacyToolDisabledResult(toolName: string): { content: Array<{ type: "text"; text: string }> } {
+  return {
+    content: [
+      {
+        type: "text",
+        text: formatLegacyToolsDisabledMessage(toolName),
+      },
+    ],
+  };
+}
+
+export function legacyCommandDisabledResult(commandName: string): { text: string } {
+  return {
+    text: formatLegacyToolsDisabledMessage(`/${commandName}`),
   };
 }
 
@@ -74,31 +104,15 @@ export function setNotificationRouter(nr: NotificationRouter | null): void {
   notificationRouter = nr;
 }
 
-export function setPluginRuntime(runtime: any): void {
-  pluginRuntime = runtime;
+// --- Runtime reference (for subagent.run / ACP access from plugin code) ---
+let _pluginRuntime: any = null;
+
+export function setPluginRuntime(rt: any): void {
+  _pluginRuntime = rt;
 }
 
-export function isLegacyToolsEnabled(): boolean {
-  return !!(pluginConfig as any).enableLegacyTools;
-}
-
-export function legacyToolDisabledResult(toolName: string) {
-  return {
-    content: [
-      {
-        type: "text",
-        text:
-          `Error: ${toolName} is disabled. Legacy harness tools are off; use harness_execute instead, or enable plugins.entries.openclaw-harness.config.enableLegacyTools if you intentionally want the old direct Claude surfaces.`,
-      },
-    ],
-  };
-}
-
-export function legacyCommandDisabledResult(commandName: string) {
-  return {
-    text:
-      `Error: /${commandName} is disabled. Legacy harness commands are off; use harness_execute instead, or enable plugins.entries.openclaw-harness.config.enableLegacyTools if you intentionally want the old direct Claude surfaces.`,
-  };
+export function getPluginRuntime(): any {
+  return _pluginRuntime;
 }
 
 /**
