@@ -21,6 +21,7 @@ export const remoteRealtimeBackend: WorkerBackendHandler = {
       context.workdir,
       context.ctx,
       context.workerModel,
+      context.workerEffort,
       context.jobId,
     );
   },

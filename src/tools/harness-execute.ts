@@ -827,6 +827,7 @@ export async function executeRealtimeTask(
   workdir: string,
   ctx: OpenClawPluginToolContext,
   workerModel: string,
+  workerEffort: import("../types").ClaudeEffortLevel | undefined,
   jobId: string,
 ): Promise<RealtimeExecutionResult> {
   const resolvedWorkdir = resolve(workdir);
@@ -835,10 +836,10 @@ export async function executeRealtimeTask(
   const notifyAgent = resolveRealtimeNotifyAgent(ctx, resolvedWorkdir);
 
   console.log(
-    `[harness] Realtime worker invoking claude-realtime.sh: script=${REALTIME_SCRIPT_PATH}, jobId=${jobId}, workdir=${resolvedWorkdir}, model=${realtimeModel}, notifyAgent=${notifyAgent}`,
+    `[harness] Realtime worker invoking claude-realtime.sh: script=${REALTIME_SCRIPT_PATH}, jobId=${jobId}, workdir=${resolvedWorkdir}, model=${realtimeModel}, effort=${workerEffort ?? "default"}, notifyAgent=${notifyAgent}`,
   );
 
-  const launch = await launchRealtimeJob(spec, resolvedWorkdir, jobId, realtimeModel, notifyAgent);
+  const launch = await launchRealtimeJob(spec, resolvedWorkdir, jobId, realtimeModel, workerEffort, notifyAgent);
   return await waitForRealtimeCheckpoint(task, plan, resolvedWorkdir, ctx, launch.jobId, launch.stateDir, "round-complete");
 }
 
@@ -915,6 +916,7 @@ async function launchRealtimeJob(
   workdir: string,
   jobId: string,
   model: "opus" | "sonnet",
+  effort: import("../types").ClaudeEffortLevel | undefined,
   notifyAgent: string,
 ): Promise<RealtimeLaunchResult> {
   if (!existsSync(REALTIME_SCRIPT_PATH)) {
@@ -931,6 +933,7 @@ async function launchRealtimeJob(
     jobId,
     "--model",
     model,
+    ...(effort ? ["--effort", effort] : []),
     "--notify-agent",
     notifyAgent,
   ];
