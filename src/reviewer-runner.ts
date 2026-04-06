@@ -5,6 +5,7 @@ import { join } from "path";
 import { nanoid } from "nanoid";
 import { resolveModelAlias } from "./model-resolution";
 import { REVIEWER_SYSTEM_PROMPT } from "./reviewer";
+import type { CodexReasoningEffortLevel } from "./types";
 
 export type ReviewerBackend = "claude-session" | "codex-cli";
 
@@ -18,6 +19,22 @@ export interface CodexReviewerCommand {
   command: string;
   args: string[];
   prompt: string;
+}
+
+function normalizeCodexReasoningEffort(level?: string): CodexReasoningEffortLevel | undefined {
+  const normalized = level?.trim().toLowerCase();
+  switch (normalized) {
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+      return normalized;
+    case "max":
+      return "xhigh";
+    default:
+      return undefined;
+  }
 }
 
 export interface CodexReviewerRunResult {
@@ -94,6 +111,7 @@ export function buildCodexReviewerCommand(options: {
   outputFile: string;
   model?: string;
   prompt: string;
+  reasoningEffort?: string;
 }): CodexReviewerCommand {
   const args = [
     "exec",
@@ -114,6 +132,11 @@ export function buildCodexReviewerCommand(options: {
     args.push("-m", options.model);
   }
 
+  const reasoningEffort = normalizeCodexReasoningEffort(options.reasoningEffort);
+  if (reasoningEffort) {
+    args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
+  }
+
   return {
     command: "codex",
     args,
@@ -125,6 +148,7 @@ export async function runReviewerWithCodexCli(options: {
   workdir: string;
   prompt: string;
   model?: string;
+  reasoningEffort?: string;
   timeoutMs?: number;
 }): Promise<CodexReviewerRunResult> {
   const sessionId = `codex-review-${nanoid(8)}`;
@@ -136,6 +160,7 @@ export async function runReviewerWithCodexCli(options: {
     outputFile,
     model: normalizedModel,
     prompt: options.prompt,
+    reasoningEffort: options.reasoningEffort,
   });
 
   try {

@@ -87,6 +87,9 @@ export interface ClaudeSession {
   foregroundChannels: Set<string>;
 }
 
+export type ClaudeEffortLevel = "low" | "medium" | "high" | "max";
+export type CodexReasoningEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface PluginConfig {
   maxSessions: number;
   defaultBudgetUsd: number;
@@ -107,6 +110,8 @@ export interface PluginConfig {
   plannerModel?: string;
   realtimeModel?: string;
   workerModel?: string;      // legacy fallback alias for realtimeModel
+  workerEffort?: ClaudeEffortLevel;
+  reviewerReasoningEffort?: CodexReasoningEffortLevel;
   workerBackend: WorkerBackend;
   memoryV3Endpoint?: string;
   routerMaxTokens: number;

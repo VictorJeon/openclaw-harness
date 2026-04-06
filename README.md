@@ -114,13 +114,13 @@ For new automated coding tasks, prefer **`harness_execute`**.
 ```bash
 git clone https://github.com/VictorJeon/openclaw-harness.git ~/.openclaw/extensions/openclaw-harness
 cd ~/.openclaw/extensions/openclaw-harness
-git checkout v0.2.4
+git checkout v0.2.5
 npm install
 npm run build
 ```
 
 For stable rollouts, pin to a known-good release instead of tracking `main` blindly.
-Current Nana/local-cc-ready release: **`v0.2.4`**.
+Current Nana/local-cc-ready release: **`v0.2.5`**.
 
 Then enable it in `~/.openclaw/openclaw.json`:
 
@@ -160,7 +160,10 @@ For Nana/local installs, keep the planner/reviewer local and opt into the local 
           operationMode: "delegate",
           plannerModel: "anthropic/claude-opus-4-6",
           reviewModel: "openai-codex/gpt-5.4",
+          realtimeModel: "anthropic/claude-opus-4-6",
           workerBackend: "local-cc",
+          workerEffort: "high",
+          reviewerReasoningEffort: "xhigh",
           enableLegacyTools: false
         }
       }

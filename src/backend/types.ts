@@ -28,6 +28,7 @@ export interface WorkerExecutionContext {
   workdir: string;
   ctx: OpenClawPluginToolContext;
   workerModel: string;
+  workerEffort?: import("../types").ClaudeEffortLevel;
   jobId: string;
 }
 

@@ -3,7 +3,7 @@ import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, relative, resolve } from "path";
-import type { HarnessPlan, TaskSpec, WorkerResult } from "../types";
+import type { ClaudeEffortLevel, HarnessPlan, TaskSpec, WorkerResult } from "../types";
 import type { WorkerBackendHandler, WorkerExecutionContext, WorkerExecutionResult } from "./types";
 
 const LOCAL_CC_COMMAND = "claude";
@@ -51,6 +51,7 @@ export interface LocalCcCommandInput {
   cwd: string;
   prompt: string;
   model: string;
+  effort?: ClaudeEffortLevel;
   timeoutMs: number;
 }
 
@@ -345,6 +346,7 @@ async function runLocalCcRound(
     cwd: resolve(context.workdir),
     prompt,
     model,
+    effort: context.workerEffort,
     timeoutMs: LOCAL_CC_TIMEOUT_MS,
   });
 
@@ -653,8 +655,8 @@ function normalizeLocalCcModel(workerModel: string): string {
   return normalized.includes("opus") ? "opus" : "sonnet";
 }
 
-function buildLocalCcArgs(model: string, prompt: string): string[] {
-  return [
+function buildLocalCcArgs(model: string, prompt: string, effort?: ClaudeEffortLevel): string[] {
+  const args = [
     "-p",
     "--output-format",
     "text",
@@ -664,8 +666,18 @@ function buildLocalCcArgs(model: string, prompt: string): string[] {
     "bypassPermissions",
     "--model",
     model,
-    prompt,
   ];
+
+  if (effort) {
+    args.push("--effort", effort);
+  }
+
+  args.push(prompt);
+  return args;
+}
+
+export function __buildLocalCcArgsForTests(model: string, prompt: string, effort?: ClaudeEffortLevel): string[] {
+  return buildLocalCcArgs(model, prompt, effort);
 }
 
 function buildLocalCcChildEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -688,7 +700,7 @@ async function defaultLocalCcCommandExecutor(
   input: LocalCcCommandInput,
 ): Promise<LocalCcCommandResult> {
   return await new Promise((resolvePromise) => {
-    const child = spawn(LOCAL_CC_COMMAND, buildLocalCcArgs(input.model, input.prompt), {
+    const child = spawn(LOCAL_CC_COMMAND, buildLocalCcArgs(input.model, input.prompt, input.effort), {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: buildLocalCcChildEnv(process.env),

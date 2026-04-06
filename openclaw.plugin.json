@@ -2,7 +2,7 @@
   "id": "openclaw-harness",
   "name": "OpenClaw Harness",
   "description": "Plan-Work-Review loop for coding tasks. Routes requests by complexity, dispatches workers, cross-model review with gap detection.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -101,6 +101,16 @@
       "workerModel": {
         "type": "string",
         "description": "Legacy fallback alias for realtimeModel. Still honored for compatibility."
+      },
+      "workerEffort": {
+        "type": "string",
+        "enum": ["low", "medium", "high", "max"],
+        "description": "Claude Code CLI effort level for worker backends that support it (local-cc uses `claude --effort ...`)."
+      },
+      "reviewerReasoningEffort": {
+        "type": "string",
+        "enum": ["minimal", "low", "medium", "high", "xhigh"],
+        "description": "Codex CLI reasoning effort for reviewer runs (passed via `codex exec -c model_reasoning_effort=...`)."
       },
       "workerBackend": {
         "type": "string",

@@ -444,7 +444,9 @@ async function executeTask(
   // realtimeModel is the preferred config key for tier 1+ Claude realtime
   // workers. workerModel remains as a legacy fallback for compatibility.
   const workerModel = pluginConfig.realtimeModel ?? pluginConfig.workerModel ?? "claude";
+  const workerEffort = pluginConfig.workerEffort;
   const reviewModel = pluginConfig.reviewModel ?? "codex";
+  const reviewerReasoningEffort = pluginConfig.reviewerReasoningEffort;
   // Tier 1+ tasks resolve their worker backend through the factory.
   // Tier 0 still falls through to sessionManager.spawn.
   const useBackendDispatch = plan.tier >= 1;
@@ -511,7 +513,7 @@ async function executeTask(
         recordSession(checkpoint, task.id, "worker", workerSessionId, workdir);
 
         const backendCtx: WorkerExecutionContext = {
-          task, plan, workdir, ctx, workerModel, jobId: workerSessionId,
+          task, plan, workdir, ctx, workerModel, workerEffort, jobId: workerSessionId,
         };
         const backendResult = await backend.executeWorker(backendCtx);
 
@@ -603,6 +605,7 @@ async function executeTask(
             prompt: reviewPrompt,
             workdir,
             model: reviewerTarget.launchModel,
+            reasoningEffort: reviewerReasoningEffort,
           });
           recordSession(checkpoint, task.id, "reviewer", codexRun.sessionId, workdir);
           reviewOutput = codexRun.output;
@@ -653,7 +656,7 @@ async function executeTask(
       if (action.action === "pass") {
         if (useBackendDispatch && backend) {
           const backendCtx: WorkerExecutionContext = {
-            task, plan, workdir, ctx, workerModel, jobId: workerSessionId,
+            task, plan, workdir, ctx, workerModel, workerEffort, jobId: workerSessionId,
           };
           const finalizeResult = await backend.finalizeWorker(backendCtx);
           if (finalizeResult.workerResult) {
@@ -718,7 +721,7 @@ async function executeTask(
       if (action.action === "fix") {
         if (useBackendDispatch && backend) {
           const backendCtx: WorkerExecutionContext = {
-            task, plan, workdir, ctx, workerModel, jobId: workerSessionId,
+            task, plan, workdir, ctx, workerModel, workerEffort, jobId: workerSessionId,
           };
           const followUpResult = await backend.continueWorker(backendCtx, action.fixPrompt);
 

@@ -269,6 +269,26 @@ function testReviewerCommandUsesCodexReadOnlyPath() {
   }
 }
 
+function testReviewerCommandSetsCodexReasoningEffort() {
+  const { mod: reviewerRunner, cleanup } = loadTsModule("src/reviewer-runner.ts");
+
+  try {
+    const command = reviewerRunner.buildCodexReviewerCommand({
+      workdir: "/tmp/project",
+      outputFile: "/tmp/project/review.json",
+      model: "gpt-5.4",
+      prompt: "review this",
+      reasoningEffort: "xhigh",
+    });
+
+    const reasoningIndex = command.args.indexOf("-c");
+    assert.ok(reasoningIndex >= 0, "expected codex reasoning config override");
+    assert.equal(command.args[reasoningIndex + 1], 'model_reasoning_effort="xhigh"');
+  } finally {
+    cleanup();
+  }
+}
+
 // --- Planner JSON parser tests ---
 
 function testPlannerJsonParsesFencedJson() {
@@ -813,6 +833,19 @@ function testSessionPrefersClaudeCredentialsOverGatewayApiKey() {
   }
 }
 
+function testLocalCcArgsIncludeClaudeEffort() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+
+  try {
+    const args = localCc.__buildLocalCcArgsForTests("claude-opus-4-6", "Solve it.", "high");
+    const effortIndex = args.indexOf("--effort");
+    assert.ok(effortIndex >= 0, "expected Claude effort flag");
+    assert.equal(args[effortIndex + 1], "high");
+  } finally {
+    cleanup();
+  }
+}
+
 function testLocalCcChildEnvPrefersClaudeCredentialsOverGatewayApiKey() {
   const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
   const tempHome = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-home-"));
@@ -901,6 +934,7 @@ const tests = [
   ["reviewer backend selection routes GPT reviewer to Codex", testReviewerBackendSelection],
   ["claude model resolution normalizes canonical refs", testClaudeModelResolutionNormalizesCanonicalRefs],
   ["reviewer command uses Codex read-only path", testReviewerCommandUsesCodexReadOnlyPath],
+  ["reviewer command sets Codex reasoning effort", testReviewerCommandSetsCodexReasoningEffort],
   ["planner JSON parser: parses fenced JSON with surrounding prose", testPlannerJsonParsesFencedJson],
   ["planner JSON parser: rejects invalid/missing JSON", testPlannerJsonRejectsInvalidJson],
   ["planner JSON parser: defaults and normalization", testPlannerJsonDefaultsAndNormalization],
@@ -915,6 +949,7 @@ const tests = [
   ["local-cc backend reuses completed execute output by jobId", testLocalCcBackendReusesCompletedExecuteOutput],
   ["local-cc backend reuses continue output and finalizes cleanly", testLocalCcBackendReusesContinueOutputAndFinalizes],
   ["session env prefers Claude credentials over gateway API key", testSessionPrefersClaudeCredentialsOverGatewayApiKey],
+  ["local-cc args include Claude effort flag", testLocalCcArgsIncludeClaudeEffort],
   ["local-cc child env prefers Claude credentials over gateway API key", testLocalCcChildEnvPrefersClaudeCredentialsOverGatewayApiKey],
   ["local-cc backend reports missing claude CLI clearly", testLocalCcBackendReportsMissingCliClearly],
 ];
