@@ -783,6 +783,31 @@ async function testLocalCcBackendReusesContinueOutputAndFinalizes() {
   }
 }
 
+function testLocalCcChildEnvPrefersClaudeCredentialsOverGatewayApiKey() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+  const tempHome = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-home-"));
+
+  try {
+    const claudeDir = join(tempHome, ".claude");
+    require("node:fs").mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, ".credentials.json"), '{"token":"present"}\n', "utf8");
+
+    const env = localCc.__buildLocalCcChildEnvForTests({
+      HOME: tempHome,
+      PATH: "/usr/bin:/bin",
+      ANTHROPIC_API_KEY: "invalid-key",
+      OTHER_VAR: "keep-me",
+    });
+
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
+    assert.equal(env.OTHER_VAR, "keep-me");
+    assert.equal(env.HOME, tempHome);
+  } finally {
+    cleanup();
+    rmSync(tempHome, { recursive: true, force: true });
+  }
+}
+
 async function testLocalCcBackendReportsMissingCliClearly() {
   const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
   const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-missing-cli-"));
@@ -859,6 +884,7 @@ const tests = [
   ["workspace isolation handles repos without HEAD commits", testWorkspaceIsolationHandlesUnbornHeadRepos],
   ["local-cc backend reuses completed execute output by jobId", testLocalCcBackendReusesCompletedExecuteOutput],
   ["local-cc backend reuses continue output and finalizes cleanly", testLocalCcBackendReusesContinueOutputAndFinalizes],
+  ["local-cc child env prefers Claude credentials over gateway API key", testLocalCcChildEnvPrefersClaudeCredentialsOverGatewayApiKey],
   ["local-cc backend reports missing claude CLI clearly", testLocalCcBackendReportsMissingCliClearly],
 ];
 

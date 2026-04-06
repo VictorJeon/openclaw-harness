@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { join, relative, resolve } from "path";
 import type { HarnessPlan, TaskSpec, WorkerResult } from "../types";
 import type { WorkerBackendHandler, WorkerExecutionContext, WorkerExecutionResult } from "./types";
@@ -668,6 +668,22 @@ function buildLocalCcArgs(model: string, prompt: string): string[] {
   ];
 }
 
+function buildLocalCcChildEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  const home = (env.HOME ?? "").trim() || homedir();
+  const claudeCredentialsPath = join(home, ".claude", ".credentials.json");
+
+  if (existsSync(claudeCredentialsPath)) {
+    delete env.ANTHROPIC_API_KEY;
+  }
+
+  return env;
+}
+
+export function __buildLocalCcChildEnvForTests(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return buildLocalCcChildEnv(baseEnv);
+}
+
 async function defaultLocalCcCommandExecutor(
   input: LocalCcCommandInput,
 ): Promise<LocalCcCommandResult> {
@@ -675,7 +691,7 @@ async function defaultLocalCcCommandExecutor(
     const child = spawn(LOCAL_CC_COMMAND, buildLocalCcArgs(input.model, input.prompt), {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: buildLocalCcChildEnv(process.env),
     });
 
     let stdout = "";
