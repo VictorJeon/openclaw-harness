@@ -1,12 +1,56 @@
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SessionConfig, SessionStatus, PermissionMode } from "./types";
 import { pluginConfig } from "./shared";
 import { resolveModelAlias } from "./model-resolution";
 import { nanoid } from "nanoid";
-import { resolveModelAlias } from "./model-resolution";
 import { tryRecoverRealtimeSyncConflict } from "./git-sync-recovery";
 
 const OUTPUT_BUFFER_MAX = 200;
+let claudeSdkAuthScrubDepth = 0;
+let savedAnthropicApiKey: string | undefined;
+
+function shouldPreferClaudeCredentials(baseEnv: NodeJS.ProcessEnv): boolean {
+  const apiKey = (baseEnv.ANTHROPIC_API_KEY ?? "").trim();
+  if (!apiKey) return false;
+
+  const home = (baseEnv.HOME ?? "").trim() || homedir();
+  const credentialsPath = join(home, ".claude", ".credentials.json");
+  return existsSync(credentialsPath);
+}
+
+export function __shouldPreferClaudeCredentialsForTests(baseEnv: NodeJS.ProcessEnv): boolean {
+  return shouldPreferClaudeCredentials(baseEnv);
+}
+
+async function withClaudeSdkAuthEnv<T>(fn: () => Promise<T>): Promise<T> {
+  if (!shouldPreferClaudeCredentials(process.env)) {
+    return await fn();
+  }
+
+  if (claudeSdkAuthScrubDepth === 0) {
+    savedAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    console.warn("[Session] Scrubbing ANTHROPIC_API_KEY for Claude SDK because ~/.claude/.credentials.json exists");
+  }
+
+  claudeSdkAuthScrubDepth += 1;
+  try {
+    return await fn();
+  } finally {
+    claudeSdkAuthScrubDepth = Math.max(0, claudeSdkAuthScrubDepth - 1);
+    if (claudeSdkAuthScrubDepth === 0) {
+      if (savedAnthropicApiKey) {
+        process.env.ANTHROPIC_API_KEY = savedAnthropicApiKey;
+      } else {
+        delete process.env.ANTHROPIC_API_KEY;
+      }
+      savedAnthropicApiKey = undefined;
+    }
+  }
+}
 
 /**
  * AsyncIterable controller for multi-turn conversations.
@@ -277,16 +321,18 @@ export class Session {
         prompt = this.prompt;
       }
 
-      q = query({
-        prompt,
-        options,
+      await withClaudeSdkAuthEnv(async () => {
+        q = query({
+          prompt,
+          options,
+        });
+
+        // Store the query handle for multi-turn control (interrupt, streamInput)
+        this.queryHandle = q;
+
+        // Run the async iteration in background (non-blocking)
+        await this.consumeMessages(q);
       });
-
-      // Store the query handle for multi-turn control (interrupt, streamInput)
-      this.queryHandle = q;
-
-      // Run the async iteration in background (non-blocking)
-      await this.consumeMessages(q);
     } catch (err: any) {
       const errorMessage = err?.message ?? String(err);
       let recovery = null;

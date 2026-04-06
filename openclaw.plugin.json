@@ -2,7 +2,7 @@
   "id": "openclaw-harness",
   "name": "OpenClaw Harness",
   "description": "Plan-Work-Review loop for coding tasks. Routes requests by complexity, dispatches workers, cross-model review with gap detection.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

@@ -114,13 +114,13 @@ For new automated coding tasks, prefer **`harness_execute`**.
 ```bash
 git clone https://github.com/VictorJeon/openclaw-harness.git ~/.openclaw/extensions/openclaw-harness
 cd ~/.openclaw/extensions/openclaw-harness
-git checkout v0.2.3
+git checkout v0.2.4
 npm install
 npm run build
 ```
 
 For stable rollouts, pin to a known-good release instead of tracking `main` blindly.
-Current Nana/local-cc-ready release: **`v0.2.3`**.
+Current Nana/local-cc-ready release: **`v0.2.4`**.
 
 Then enable it in `~/.openclaw/openclaw.json`:
 

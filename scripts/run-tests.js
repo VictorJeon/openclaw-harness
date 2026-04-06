@@ -11,6 +11,7 @@ function loadTsModule(relativePath) {
   const entry = resolve(ROOT, relativePath);
   const tempDir = mkdtempSync(join(tmpdir(), "openclaw-harness-test-"));
   const outfile = join(tempDir, basename(relativePath).replace(/\.ts$/, ".cjs"));
+  symlinkSync(resolve(ROOT, "node_modules"), join(tempDir, "node_modules"), "dir");
 
   esbuild.buildSync({
     entryPoints: [entry],
@@ -783,6 +784,35 @@ async function testLocalCcBackendReusesContinueOutputAndFinalizes() {
   }
 }
 
+function testSessionPrefersClaudeCredentialsOverGatewayApiKey() {
+  const { mod: sessionMod, cleanup } = loadTsModule("src/session.ts");
+  const tempHome = mkdtempSync(join(tmpdir(), "openclaw-harness-session-home-"));
+
+  try {
+    const claudeDir = join(tempHome, ".claude");
+    require("node:fs").mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, ".credentials.json"), '{"token":"present"}\n', "utf8");
+
+    assert.equal(
+      sessionMod.__shouldPreferClaudeCredentialsForTests({
+        HOME: tempHome,
+        ANTHROPIC_API_KEY: "invalid-key",
+      }),
+      true,
+    );
+
+    assert.equal(
+      sessionMod.__shouldPreferClaudeCredentialsForTests({
+        HOME: tempHome,
+      }),
+      false,
+    );
+  } finally {
+    cleanup();
+    rmSync(tempHome, { recursive: true, force: true });
+  }
+}
+
 function testLocalCcChildEnvPrefersClaudeCredentialsOverGatewayApiKey() {
   const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
   const tempHome = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-home-"));
@@ -884,6 +914,7 @@ const tests = [
   ["workspace isolation handles repos without HEAD commits", testWorkspaceIsolationHandlesUnbornHeadRepos],
   ["local-cc backend reuses completed execute output by jobId", testLocalCcBackendReusesCompletedExecuteOutput],
   ["local-cc backend reuses continue output and finalizes cleanly", testLocalCcBackendReusesContinueOutputAndFinalizes],
+  ["session env prefers Claude credentials over gateway API key", testSessionPrefersClaudeCredentialsOverGatewayApiKey],
   ["local-cc child env prefers Claude credentials over gateway API key", testLocalCcChildEnvPrefersClaudeCredentialsOverGatewayApiKey],
   ["local-cc backend reports missing claude CLI clearly", testLocalCcBackendReportsMissingCliClearly],
 ];
