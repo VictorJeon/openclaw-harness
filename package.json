@@ -1,6 +1,6 @@
 {
   "name": "openclaw-harness",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
@@ -18,11 +18,11 @@
     "README.md"
   ],
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.2.37"
+    "@anthropic-ai/claude-agent-sdk": "0.2.92"
   },
   "devDependencies": {
-    "esbuild": "^0.27.3",
     "@sinclair/typebox": "^0.34.48",
+    "esbuild": "^0.27.3",
     "nanoid": "^3.3.7"
   },
   "keywords": [
