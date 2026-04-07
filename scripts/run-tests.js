@@ -513,6 +513,20 @@ function testHarnessDefersTransientPlanViolationDuringRoundComplete() {
   }
 }
 
+function testHarnessSkipsClaudeMdCheckWhenProjectContextMissing() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-claude-md-missing-"));
+
+  try {
+    assert.equal(harnessExecute.__shouldSkipClaudeMdCheckForTests(workdir), true);
+    writeFileSync(join(workdir, "CLAUDE.md"), "# context\n", "utf8");
+    assert.equal(harnessExecute.__shouldSkipClaudeMdCheckForTests(workdir), false);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 function testHarnessPromotesLaterSuccessAfterPlanViolation() {
   const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
   const stateDir = mkdtempSync(join(tmpdir(), "openclaw-harness-realtime-success-"));
@@ -1183,6 +1197,7 @@ const tests = [
   ["extractFilePaths captures root and nested repo files", testExtractFilePathsCapturesRootAndNestedFiles],
   ["realtime harness defers transient plan_violation during round-complete", testHarnessDefersTransientPlanViolationDuringRoundComplete],
   ["realtime harness promotes later success after plan_violation", testHarnessPromotesLaterSuccessAfterPlanViolation],
+  ["realtime harness skips CLAUDE.md check when project context file is absent", testHarnessSkipsClaudeMdCheckWhenProjectContextMissing],
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],
   ["checkpoint finds recoverable run through symlinked workdir alias", testFindRecoverableCheckpointMatchesSymlinkedWorkdir],

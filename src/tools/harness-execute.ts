@@ -863,6 +863,7 @@ async function launchRealtimeJob(
     "--model",
     model,
     ...(effort ? ["--effort", effort] : []),
+    ...(shouldSkipClaudeMdCheck(workdir) ? ["--skip-claude-md"] : []),
     "--notify-agent",
     notifyAgent,
   ];
@@ -1619,6 +1620,14 @@ function buildRealtimeJobId(planId: string, taskId: string): string {
   const planPart = sanitizeRealtimeFragment(planId).slice(0, 32);
   const taskPart = sanitizeRealtimeFragment(taskId).slice(0, 24);
   return `harness-${planPart || "plan"}-${taskPart || "task"}-${Date.now()}`;
+}
+
+function shouldSkipClaudeMdCheck(workdir: string): boolean {
+  return !existsSync(join(workdir, "CLAUDE.md"));
+}
+
+export function __shouldSkipClaudeMdCheckForTests(workdir: string): boolean {
+  return shouldSkipClaudeMdCheck(workdir);
 }
 
 function sanitizeRealtimeFragment(value: string): string {

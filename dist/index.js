@@ -6455,6 +6455,7 @@ async function launchRealtimeJob(spec, workdir, jobId, model, effort, notifyAgen
     "--model",
     model,
     ...effort ? ["--effort", effort] : [],
+    ...shouldSkipClaudeMdCheck(workdir) ? ["--skip-claude-md"] : [],
     "--notify-agent",
     notifyAgent
   ];
@@ -7002,6 +7003,9 @@ function buildRealtimeJobId(planId, taskId) {
   const planPart = sanitizeRealtimeFragment(planId).slice(0, 32);
   const taskPart = sanitizeRealtimeFragment(taskId).slice(0, 24);
   return `harness-${planPart || "plan"}-${taskPart || "task"}-${Date.now()}`;
+}
+function shouldSkipClaudeMdCheck(workdir) {
+  return !(0, import_fs7.existsSync)((0, import_path7.join)(workdir, "CLAUDE.md"));
 }
 function sanitizeRealtimeFragment(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
