@@ -43,7 +43,8 @@ export interface CodexReviewerRunResult {
   model?: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS =
+  parseInt(process.env.OPENCLAW_HARNESS_REVIEW_TIMEOUT_MS ?? "", 10) || 2 * 60 * 1000;
 
 /**
  * Decide which runtime should execute the reviewer.

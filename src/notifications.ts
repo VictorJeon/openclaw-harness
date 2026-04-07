@@ -30,7 +30,8 @@ interface DebounceEntry {
 }
 
 const DEBOUNCE_MS = 500;
-const LONG_RUNNING_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+const LONG_RUNNING_THRESHOLD_MS =
+  parseInt(process.env.OPENCLAW_HARNESS_LONG_RUNNING_THRESHOLD_MS ?? "", 10) || 2 * 60 * 1000; // 2 minutes
 
 export class NotificationRouter {
   private sendMessage: SendMessageFn;
