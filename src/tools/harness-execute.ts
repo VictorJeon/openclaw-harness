@@ -1038,6 +1038,24 @@ async function waitForRealtimeTerminalState(
       };
     }
 
+    if (lastStatus === "plan_violation") {
+      const handling = classifyPlanViolationHandling(stateDir, goal);
+      if (handling === "waiting") {
+        return {
+          status: "waiting",
+          ...buildRealtimeSummary(
+            stateDir,
+            "waiting",
+            "Recovered round-complete after transient plan_violation with a later successful worker result.",
+          ),
+        };
+      }
+      if (handling === "defer") {
+        await sleep(REALTIME_POLL_INTERVAL_MS);
+        continue;
+      }
+    }
+
     if (isRealtimeTerminalStatus(lastStatus)) {
       const recoveredSuccess = goal === "terminal"
         ? recoverSuccessfulRealtimeTerminalState(stateDir, lastStatus)
@@ -1336,6 +1354,64 @@ function isRealtimeTerminalStatus(status: string | null | undefined): boolean {
   );
 }
 
+type LatestRealtimeResult = {
+  sessionId?: string;
+  resultText?: string;
+  numTurns?: number;
+  costUsd?: number;
+  subtype?: string;
+  isError?: boolean;
+  round?: number;
+  permissionDenials?: string[];
+};
+
+function isLikelyRealtimePlanSummary(result: LatestRealtimeResult | null): boolean {
+  const text = result?.resultText?.trim() ?? "";
+  if (!text) return false;
+  return /^plan summary:/i.test(text);
+}
+
+function isSubstantiveRealtimeSuccess(result: LatestRealtimeResult | null): boolean {
+  if (!result?.resultText) return false;
+  if (result.isError === true) return false;
+  if (result.subtype && result.subtype !== "success") return false;
+  if (isLikelyRealtimePlanSummary(result)) return false;
+  if ((result.permissionDenials ?? []).includes("ExitPlanMode")) return false;
+  return true;
+}
+
+function classifyPlanViolationHandling(
+  stateDir: string,
+  goal: "round-complete" | "terminal",
+): "defer" | "waiting" | "terminal" {
+  if (goal !== "round-complete") {
+    return "terminal";
+  }
+
+  const latestResult = readLatestRealtimeResult(stateDir);
+  if (isSubstantiveRealtimeSuccess(latestResult)) {
+    return "waiting";
+  }
+
+  const hasExitPlanModeDenial = (latestResult?.permissionDenials ?? []).includes("ExitPlanMode");
+  if (hasExitPlanModeDenial || isLikelyRealtimePlanSummary(latestResult)) {
+    return "defer";
+  }
+
+  return "terminal";
+}
+
+export function __classifyPlanViolationHandlingForTests(
+  stateDir: string,
+  goal: "round-complete" | "terminal" = "round-complete",
+): "defer" | "waiting" | "terminal" {
+  return classifyPlanViolationHandling(stateDir, goal);
+}
+
+export function __readLatestRealtimeResultForTests(stateDir: string): LatestRealtimeResult | null {
+  return readLatestRealtimeResult(stateDir);
+}
+
 function parseRealtimeStateDir(output: string, jobId: string): string {
   const match = output.match(/BG:(\/tmp\/claude-realtime\/[^\s]+)/);
   return match?.[1] ?? join(REALTIME_STATE_ROOT, jobId);
@@ -1383,7 +1459,7 @@ function buildRealtimeSummary(
 
 function readLatestRealtimeResult(
   stateDir: string,
-): { sessionId?: string; resultText?: string; numTurns?: number; costUsd?: number; subtype?: string; isError?: boolean } | null {
+): LatestRealtimeResult | null {
   try {
     if (!existsSync(stateDir)) return null;
 
@@ -1392,7 +1468,13 @@ function readLatestRealtimeResult(
       .sort((a, b) => extractRealtimeRound(a) - extractRealtimeRound(b));
     if (resultFiles.length === 0) return null;
 
-    const latest = JSON.parse(readFileSync(join(stateDir, resultFiles[resultFiles.length - 1]), "utf-8"));
+    const latestFilename = resultFiles[resultFiles.length - 1];
+    const latest = JSON.parse(readFileSync(join(stateDir, latestFilename), "utf-8"));
+    const permissionDenials = Array.isArray(latest.permission_denials)
+      ? latest.permission_denials
+          .map((entry: any) => typeof entry?.tool_name === "string" ? entry.tool_name : null)
+          .filter((value: string | null): value is string => Boolean(value))
+      : [];
     return {
       sessionId: typeof latest.session_id === "string" ? latest.session_id : undefined,
       resultText: typeof latest.result === "string" ? latest.result : undefined,
@@ -1400,6 +1482,8 @@ function readLatestRealtimeResult(
       costUsd: typeof latest.total_cost_usd === "number" ? latest.total_cost_usd : undefined,
       subtype: typeof latest.subtype === "string" ? latest.subtype : undefined,
       isError: typeof latest.is_error === "boolean" ? latest.is_error : undefined,
+      round: extractRealtimeRound(latestFilename),
+      permissionDenials,
     };
   } catch {
     return null;

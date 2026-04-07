@@ -481,6 +481,75 @@ function testExtractFilePathsCapturesRootAndNestedFiles() {
   }
 }
 
+function testHarnessDefersTransientPlanViolationDuringRoundComplete() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+  const stateDir = mkdtempSync(join(tmpdir(), "openclaw-harness-realtime-plan-"));
+
+  try {
+    writeFileSync(join(stateDir, "result-1.json"), JSON.stringify({
+      subtype: "success",
+      is_error: false,
+      result: "Plan summary:\n\nNeed to update the optimizer.",
+      permission_denials: [{ tool_name: "ExitPlanMode" }],
+      session_id: "sess-1",
+      num_turns: 3,
+      total_cost_usd: 0.12,
+    }), "utf8");
+
+    const latest = harnessExecute.__readLatestRealtimeResultForTests(stateDir);
+    assert.deepEqual(latest.permissionDenials, ["ExitPlanMode"]);
+    assert.equal(latest.round, 1);
+    assert.equal(
+      harnessExecute.__classifyPlanViolationHandlingForTests(stateDir, "round-complete"),
+      "defer",
+    );
+    assert.equal(
+      harnessExecute.__classifyPlanViolationHandlingForTests(stateDir, "terminal"),
+      "terminal",
+    );
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+function testHarnessPromotesLaterSuccessAfterPlanViolation() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+  const stateDir = mkdtempSync(join(tmpdir(), "openclaw-harness-realtime-success-"));
+
+  try {
+    writeFileSync(join(stateDir, "result-1.json"), JSON.stringify({
+      subtype: "success",
+      is_error: false,
+      result: "Plan summary:\n\nNeed to update the optimizer.",
+      permission_denials: [{ tool_name: "ExitPlanMode" }],
+      session_id: "sess-1",
+      num_turns: 3,
+      total_cost_usd: 0.12,
+    }), "utf8");
+    writeFileSync(join(stateDir, "result-2.json"), JSON.stringify({
+      subtype: "success",
+      is_error: false,
+      result: "## Summary\n\nCommit: abc123\n\nTests Passed: 151 passed in 0.53s",
+      permission_denials: [],
+      session_id: "sess-1",
+      num_turns: 83,
+      total_cost_usd: 6.24,
+    }), "utf8");
+
+    const latest = harnessExecute.__readLatestRealtimeResultForTests(stateDir);
+    assert.equal(latest.round, 2);
+    assert.deepEqual(latest.permissionDenials, []);
+    assert.equal(
+      harnessExecute.__classifyPlanViolationHandlingForTests(stateDir, "round-complete"),
+      "waiting",
+    );
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 function testCheckpointMarksFailedWhenTaskFailsEarly() {
   const { mod: checkpointMod, cleanup } = loadTsModule("src/checkpoint.ts");
   const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-checkpoint-"));
@@ -1112,6 +1181,8 @@ const tests = [
   ["planner JSON parser: handles generic fence block", testExtractFencedJsonHandlesGenericFence],
   ["model planner uses JSON as primary parse path", testModelPlannerUsesJsonPrimary],
   ["extractFilePaths captures root and nested repo files", testExtractFilePathsCapturesRootAndNestedFiles],
+  ["realtime harness defers transient plan_violation during round-complete", testHarnessDefersTransientPlanViolationDuringRoundComplete],
+  ["realtime harness promotes later success after plan_violation", testHarnessPromotesLaterSuccessAfterPlanViolation],
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],
   ["checkpoint finds recoverable run through symlinked workdir alias", testFindRecoverableCheckpointMatchesSymlinkedWorkdir],

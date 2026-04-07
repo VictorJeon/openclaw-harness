@@ -2653,7 +2653,6 @@ var DEFAULT_PLUGIN_CONFIG = {
   idleTimeoutMinutes: 30,
   maxPersistedSessions: 50,
   maxAutoResponds: 10,
-  operationMode: "delegate",
   maxReviewLoops: 4,
   routerMaxTokens: 500,
   plannerMaxTokens: 2e3,
@@ -2726,7 +2725,6 @@ function setPluginConfig(config) {
     agentChannels,
     maxAutoResponds: config.maxAutoResponds ?? 10,
     skipSafetyChecks: config.skipSafetyChecks,
-    operationMode: config.operationMode ?? "delegate",
     maxReviewLoops: config.maxReviewLoops ?? 4,
     reviewModel: config.reviewModel,
     plannerModel: config.plannerModel,
@@ -4889,17 +4887,6 @@ function saveCheckpoint(checkpoint, workdir) {
     console.error(`[checkpoint] Failed to save: ${err.message}`);
   }
 }
-function loadCheckpoint(runId, workdir) {
-  const path = checkpointPath(workdir, runId);
-  try {
-    if (!(0, import_fs3.existsSync)(path)) return null;
-    const raw = (0, import_fs3.readFileSync)(path, "utf-8");
-    return JSON.parse(raw);
-  } catch (err) {
-    console.error(`[checkpoint] Failed to load: ${err.message}`);
-    return null;
-  }
-}
 function updateTaskStatus(checkpoint, taskId, status, workdir, extra) {
   const task = checkpoint.tasks.find((t) => t.id === taskId);
   if (!task) {
@@ -5894,18 +5881,6 @@ function makeHarnessExecuteTool(ctx) {
       workdir: Type.Optional(
         Type.String({ description: "Working directory for the task" })
       ),
-      mode: Type.Optional(
-        Type.Union(
-          [
-            Type.Literal("ask"),
-            Type.Literal("delegate"),
-            Type.Literal("autonomous")
-          ],
-          {
-            description: "Operation mode override. ask=all approvals, delegate=auto safe ops (default), autonomous=fully auto"
-          }
-        )
-      ),
       tier_override: Type.Optional(
         Type.Union(
           [Type.Literal(0), Type.Literal(1), Type.Literal(2)],
@@ -5914,11 +5889,6 @@ function makeHarnessExecuteTool(ctx) {
       ),
       max_budget_usd: Type.Optional(
         Type.Number({ description: "Maximum budget in USD (default from config)" })
-      ),
-      approved_plan_id: Type.Optional(
-        Type.String({
-          description: "Plan ID from a previous approval-gated response. Pass this to skip the approval gate and execute the approved plan."
-        })
       )
     }),
     async execute(_id, params) {
@@ -5933,41 +5903,15 @@ function makeHarnessExecuteTool(ctx) {
         };
       }
       const workdir = params.workdir || ctx.workspaceDir || pluginConfig.defaultWorkdir || process.cwd();
-      const mode = params.mode ?? pluginConfig.operationMode ?? "delegate";
+      const mode = "autonomous";
       const maxBudgetUsd = params.max_budget_usd ?? pluginConfig.defaultBudgetUsd ?? 5;
-      const autoResumeCheckpoint = !params.approved_plan_id ? findRecoverableCheckpoint(params.request, workdir) : null;
+      const autoResumeCheckpoint = findRecoverableCheckpoint(params.request, workdir);
       const route = classifyRequest(params.request);
       const tier = params.tier_override ?? route.tier;
       console.log(`[harness] Route: tier=${tier}, confidence=${route.confidence}, reason=${route.reason}`);
-      const isRiskyConfig = isRiskyTier0(params.request);
-      let existingCheckpoint = null;
-      if (params.approved_plan_id) {
-        existingCheckpoint = loadCheckpoint(params.approved_plan_id, workdir);
-        if (!existingCheckpoint) {
-          return {
-            isError: true,
-            content: [{
-              type: "text",
-              text: `Error: approved_plan_id "${params.approved_plan_id}" not found. It may have expired or the workdir doesn't match.`
-            }]
-          };
-        }
-        if (existingCheckpoint.plan.originalRequest !== params.request) {
-          return {
-            isError: true,
-            content: [{
-              type: "text",
-              text: `Error: approved_plan_id "${params.approved_plan_id}" was created for a different request. Cannot reuse approval across different requests.`
-            }]
-          };
-        }
-      } else if (autoResumeCheckpoint) {
-        existingCheckpoint = autoResumeCheckpoint;
-      }
+      const existingCheckpoint = autoResumeCheckpoint;
       if (existingCheckpoint) {
-        console.log(
-          params.approved_plan_id ? `[harness] Executing approved plan: ${params.approved_plan_id}` : `[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`
-        );
+        console.log(`[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`);
         const plan2 = existingCheckpoint.plan;
         const runState = buildExecutionRunState(existingCheckpoint);
         if (runState.mode === "resumed" && existingCheckpoint.status !== "complete") {
@@ -5985,19 +5929,6 @@ function makeHarnessExecuteTool(ctx) {
           content: [{
             type: "text",
             text: formatFinalResult(plan2, route, taskResults2, mode, existingCheckpoint, runState, materialized2)
-          }]
-        };
-      }
-      const needsApproval = mode === "ask" && (tier > 0 || isRiskyConfig) || isRiskyConfig && mode !== "autonomous" || mode === "delegate" && tier === 2;
-      if (needsApproval) {
-        const memoryContext2 = tier > 0 ? await loadPlanningMemory(workdir) : "";
-        const plan2 = await createExecutionPlan(params.request, tier > 0 ? tier : 1, memoryContext2, workdir);
-        const checkpoint2 = initCheckpoint(plan2, workdir);
-        checkpoint2.status = "running";
-        return {
-          content: [{
-            type: "text",
-            text: formatPlanForApproval(plan2, route, mode)
           }]
         };
       }
@@ -6661,6 +6592,23 @@ async function waitForRealtimeTerminalState(stateDir, jobId, task, plan, ctx, wo
         ...buildRealtimeSummary(stateDir, lastStatus)
       };
     }
+    if (lastStatus === "plan_violation") {
+      const handling = classifyPlanViolationHandling(stateDir, goal);
+      if (handling === "waiting") {
+        return {
+          status: "waiting",
+          ...buildRealtimeSummary(
+            stateDir,
+            "waiting",
+            "Recovered round-complete after transient plan_violation with a later successful worker result."
+          )
+        };
+      }
+      if (handling === "defer") {
+        await sleep(REALTIME_POLL_INTERVAL_MS);
+        continue;
+      }
+    }
     if (isRealtimeTerminalStatus(lastStatus)) {
       const recoveredSuccess2 = goal === "terminal" ? recoverSuccessfulRealtimeTerminalState(stateDir, lastStatus) : null;
       if (recoveredSuccess2) {
@@ -6873,6 +6821,33 @@ function isRealtimeTerminalStatus(status) {
   if (!status) return false;
   return status === "done" || status === "aborted" || status === "plan_violation" || status === "loop" || status === "error" || status.startsWith("error:");
 }
+function isLikelyRealtimePlanSummary(result) {
+  const text = result?.resultText?.trim() ?? "";
+  if (!text) return false;
+  return /^plan summary:/i.test(text);
+}
+function isSubstantiveRealtimeSuccess(result) {
+  if (!result?.resultText) return false;
+  if (result.isError === true) return false;
+  if (result.subtype && result.subtype !== "success") return false;
+  if (isLikelyRealtimePlanSummary(result)) return false;
+  if ((result.permissionDenials ?? []).includes("ExitPlanMode")) return false;
+  return true;
+}
+function classifyPlanViolationHandling(stateDir, goal) {
+  if (goal !== "round-complete") {
+    return "terminal";
+  }
+  const latestResult = readLatestRealtimeResult(stateDir);
+  if (isSubstantiveRealtimeSuccess(latestResult)) {
+    return "waiting";
+  }
+  const hasExitPlanModeDenial = (latestResult?.permissionDenials ?? []).includes("ExitPlanMode");
+  if (hasExitPlanModeDenial || isLikelyRealtimePlanSummary(latestResult)) {
+    return "defer";
+  }
+  return "terminal";
+}
 function parseRealtimeStateDir(output, jobId) {
   const match = output.match(/BG:(\/tmp\/claude-realtime\/[^\s]+)/);
   return match?.[1] ?? (0, import_path7.join)(REALTIME_STATE_ROOT, jobId);
@@ -6913,14 +6888,18 @@ function readLatestRealtimeResult(stateDir) {
     if (!(0, import_fs7.existsSync)(stateDir)) return null;
     const resultFiles = (0, import_fs7.readdirSync)(stateDir).filter((name) => /^result-\d+\.json$/.test(name)).sort((a, b) => extractRealtimeRound(a) - extractRealtimeRound(b));
     if (resultFiles.length === 0) return null;
-    const latest = JSON.parse((0, import_fs7.readFileSync)((0, import_path7.join)(stateDir, resultFiles[resultFiles.length - 1]), "utf-8"));
+    const latestFilename = resultFiles[resultFiles.length - 1];
+    const latest = JSON.parse((0, import_fs7.readFileSync)((0, import_path7.join)(stateDir, latestFilename), "utf-8"));
+    const permissionDenials = Array.isArray(latest.permission_denials) ? latest.permission_denials.map((entry) => typeof entry?.tool_name === "string" ? entry.tool_name : null).filter((value) => Boolean(value)) : [];
     return {
       sessionId: typeof latest.session_id === "string" ? latest.session_id : void 0,
       resultText: typeof latest.result === "string" ? latest.result : void 0,
       numTurns: typeof latest.num_turns === "number" ? latest.num_turns : void 0,
       costUsd: typeof latest.total_cost_usd === "number" ? latest.total_cost_usd : void 0,
       subtype: typeof latest.subtype === "string" ? latest.subtype : void 0,
-      isError: typeof latest.is_error === "boolean" ? latest.is_error : void 0
+      isError: typeof latest.is_error === "boolean" ? latest.is_error : void 0,
+      round: extractRealtimeRound(latestFilename),
+      permissionDenials
     };
   } catch {
     return null;
@@ -7134,26 +7113,6 @@ function extractWarnings(output) {
   }
   return warnings.slice(0, 10);
 }
-var RISKY_CONFIG_PATTERNS = [
-  /\.env\b/i,
-  /\.plist\b/i,
-  /credentials/i,
-  /secrets?\b/i,
-  /\bapi[_-]?key/i,
-  /\btoken\b.*\b(수정|변경|update|change|set)\b/i,
-  /openclaw\.json/i,
-  /package\.json/i,
-  /tsconfig/i,
-  /config\.ya?ml/i,
-  /\.ya?ml\b.*\b(config|설정)/i,
-  /\b(settings|configuration)\.ya?ml/i,
-  /docker(file|compose)/i,
-  /nginx\.conf/i,
-  /\.gitignore/i
-];
-function isRiskyTier0(request) {
-  return RISKY_CONFIG_PATTERNS.some((p) => p.test(request));
-}
 function buildWorkerPrompt(task, plan) {
   return [
     `## Task: ${task.title}`,
@@ -7171,36 +7130,6 @@ function buildWorkerPrompt(task, plan) {
     `- When done, summarize: files changed, tests run, warnings.`,
     `- If you encounter ambiguity, make the simplest reasonable choice and document it.`
   ].join("\n");
-}
-function formatPlanForApproval(plan, route, mode) {
-  const lines = [
-    `## Harness: Plan Requires Approval`,
-    ``,
-    `**Tier:** ${route.tier} (${route.confidence})`,
-    `**Mode:** ${mode}`,
-    `**Plan ID:** ${plan.id}`,
-    `**Tasks:** ${plan.tasks.length} (${plan.mode})`,
-    ...formatPlannerMetadata(plan.plannerMetadata),
-    ``,
-    `### Tasks`
-  ];
-  for (const task of plan.tasks) {
-    lines.push(
-      ``,
-      `**${task.id}: ${task.title}**`,
-      `- Scope: ${task.scope}`,
-      `- Agent: ${task.agent}`,
-      `- Acceptance criteria:`,
-      ...task.acceptanceCriteria.map((c) => `  - ${c}`)
-    );
-  }
-  lines.push(
-    ``,
-    `---`,
-    `To approve, re-call with \`approved_plan_id: "${plan.id}"\`.`,
-    `Or modify the request and re-run.`
-  );
-  return lines.join("\n");
 }
 function formatPlannerMetadata(metadata) {
   if (!metadata) return [];
