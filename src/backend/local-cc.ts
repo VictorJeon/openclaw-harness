@@ -8,7 +8,8 @@ import type { WorkerBackendHandler, WorkerExecutionContext, WorkerExecutionResul
 
 const LOCAL_CC_COMMAND = "claude";
 const LOCAL_CC_STATE_VERSION = 1;
-const LOCAL_CC_TIMEOUT_MS = 60 * 60 * 1000;
+const LOCAL_CC_ROUND_TIMEOUT_MS =
+  parseInt(process.env.LOCAL_CC_ROUND_TIMEOUT_MS ?? "", 10) || 5 * 60 * 1000;
 
 export const LOCAL_CC_STATE_ROOT = join(tmpdir(), "openclaw-harness-local-cc");
 
@@ -348,12 +349,20 @@ async function runLocalCcRound(
   delete state.lastError;
   persistLocalCcState(state);
 
+  // Write a timestamped status line so observers can detect stuck rounds.
+  writeFileSync(
+    join(stateDir, "status"),
+    `running round ${nextRound} since ${startedAt}\n`,
+    "utf8",
+  );
+
+  const roundTimeoutMs = LOCAL_CC_ROUND_TIMEOUT_MS;
   const commandResult = await localCcCommandExecutor({
     cwd: resolve(context.workdir),
     prompt,
     model,
     effort: context.workerEffort,
-    timeoutMs: LOCAL_CC_TIMEOUT_MS,
+    timeoutMs: roundTimeoutMs,
   });
 
   const stdout = normalizeLocalCcOutput(commandResult.stdout);
@@ -364,7 +373,13 @@ async function runLocalCcRound(
 
   const output = stdout || stderr;
   if (commandResult.exitCode !== 0 || commandResult.error) {
+    const elapsedMs = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+    const elapsedSec = Math.round(elapsedMs / 1000);
+    const isStuckTimeout = elapsedMs >= roundTimeoutMs * 0.95;
     const error = formatLocalCcCommandFailure(commandResult, stderr, stdout);
+    const errorDetail = isStuckTimeout
+      ? `local-cc round ${nextRound} for job ${context.jobId} stuck: killed after ${elapsedSec}s (timeout ${Math.round(roundTimeoutMs / 1000)}s). Check ${stateDir} for logs.`
+      : undefined;
     state.rounds.push({
       round: nextRound,
       kind,
@@ -375,15 +390,15 @@ async function runLocalCcRound(
       feedbackFile,
       feedbackHash: feedback ? hashLocalCcFeedback(feedback) : undefined,
       summary: summarizeLocalCcOutput(output),
-      error,
+      error: errorDetail ?? error,
       startedAt,
       completedAt,
     });
     state.status = "error";
     state.updatedAt = completedAt;
-    state.lastError = error;
+    state.lastError = errorDetail ?? error;
     persistLocalCcState(state);
-    return buildLocalCcExecutionResult(context.jobId, "error", output, null, error);
+    return buildLocalCcExecutionResult(context.jobId, "error", output, null, errorDetail ?? error, errorDetail);
   }
 
   if (!output) {
@@ -448,6 +463,7 @@ function buildLocalCcExecutionResult(
   output: string,
   workerResult: WorkerResult | null,
   error?: string,
+  errorDetail?: string,
 ): WorkerExecutionResult {
   return {
     jobId,
@@ -456,6 +472,7 @@ function buildLocalCcExecutionResult(
     status,
     workerResult,
     error,
+    errorDetail,
   };
 }
 

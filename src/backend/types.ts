@@ -16,6 +16,8 @@ export interface WorkerExecutionResult {
   status: string;
   workerResult: import("../types").WorkerResult | null;
   error?: string;
+  /** User-visible detail string for surfacing stuck/timeout conditions. */
+  errorDetail?: string;
 }
 
 /**

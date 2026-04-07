@@ -521,7 +521,9 @@ async function executeTask(
           updateTaskStatus(checkpoint, task.id, "failed", workdir, {
             workerResult: backendResult.workerResult ?? undefined,
           });
-          const backendError = backendResult.error ?? `Worker job ${workerSessionId} ended with status=${backendResult.status}`;
+          const backendError = backendResult.errorDetail
+            ?? backendResult.error
+            ?? `Worker job ${workerSessionId} ended with status=${backendResult.status}`;
           return {
             taskId: task.id,
             workerSessionId,
@@ -732,7 +734,9 @@ async function executeTask(
               reviewResult,
               workerResult: followUpResult.workerResult ?? currentWorkerResult,
             });
-            const followUpError = followUpResult.error ?? `Worker follow-up ended with status=${followUpResult.status}`;
+            const followUpError = followUpResult.errorDetail
+              ?? followUpResult.error
+              ?? `Worker follow-up ended with status=${followUpResult.status}`;
             return {
               taskId: task.id,
               workerSessionId,
