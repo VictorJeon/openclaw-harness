@@ -263,9 +263,15 @@ function validateLocalCcState(
     );
   }
   if (state.workdir !== expectedWorkdir) {
-    throw new Error(
-      `local-cc state collision for jobId ${context.jobId}: workdir mismatch (${state.workdir} != ${expectedWorkdir}).`,
+    const oldWorkdir = state.workdir;
+    const oldWorkdirExists = existsSync(oldWorkdir);
+    console.error(
+      `[local-cc] workdir migrated for jobId ${context.jobId}: ${oldWorkdir} -> ${expectedWorkdir}`
+      + ` (old workdir ${oldWorkdirExists ? "still exists" : "vanished"})`,
     );
+    state.workdir = expectedWorkdir;
+    state.updatedAt = new Date().toISOString();
+    persistLocalCcState(state);
   }
 }
 

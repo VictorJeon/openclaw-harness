@@ -925,6 +925,176 @@ async function testLocalCcBackendReportsMissingCliClearly() {
   }
 }
 
+async function testLocalCcWorkdirMismatchRecovery() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+  const oldWorkdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-old-"));
+  const newWorkdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-new-"));
+  const jobId = `test-local-cc-workdir-migration-${Date.now()}`;
+  let calls = 0;
+
+  const makeContext = (workdir) => ({
+    task: {
+      id: "task-wd-1",
+      title: "Test workdir migration",
+      scope: "src/backend/local-cc.ts",
+      acceptanceCriteria: ["workdir migration works"],
+      agent: "claude",
+    },
+    plan: {
+      id: "plan-wd-1",
+      originalRequest: "Test workdir migration",
+      tasks: [],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    },
+    workdir,
+    ctx: {},
+    workerModel: "anthropic/claude-sonnet-4-6",
+    jobId,
+  });
+
+  localCc.__setLocalCcCommandExecutorForTests(async () => {
+    calls++;
+    return {
+      exitCode: 0,
+      stdout: "Summary:\nDone.\n\nFiles changed:\n- file.ts\n\nTests run:\n1 tests passed\n\nWarnings:",
+      stderr: "",
+    };
+  });
+
+  try {
+    // First execute with old workdir creates state
+    const first = await localCc.localCcBackend.executeWorker(makeContext(oldWorkdir));
+    assert.equal(first.status, "waiting");
+    assert.equal(calls, 1);
+
+    const stateAfterFirst = localCc.readLocalCcJobState(jobId);
+    assert.equal(stateAfterFirst.workdir, resolve(oldWorkdir));
+
+    // Second execute with new workdir should recover gracefully, not throw
+    const second = await localCc.localCcBackend.executeWorker(makeContext(newWorkdir));
+    assert.equal(second.status, "waiting", "should reuse completed round after workdir migration");
+
+    const stateAfterMigration = localCc.readLocalCcJobState(jobId);
+    assert.equal(stateAfterMigration.workdir, resolve(newWorkdir), "state.workdir should be updated to new workdir");
+    assert.equal(stateAfterMigration.taskId, "task-wd-1");
+    assert.equal(stateAfterMigration.planId, "plan-wd-1");
+
+    // CLI should NOT have been called again — reused existing round
+    assert.equal(calls, 1, "should reuse completed output, not re-execute");
+  } finally {
+    localCc.__resetLocalCcCommandExecutorForTests();
+    rmSync(localCc.getLocalCcStateDir(jobId), { recursive: true, force: true });
+    rmSync(oldWorkdir, { recursive: true, force: true });
+    rmSync(newWorkdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+async function testLocalCcWorkdirMismatchRecoveryVanishedOldDir() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+  const oldWorkdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-vanish-"));
+  const newWorkdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-new2-"));
+  const jobId = `test-local-cc-vanished-workdir-${Date.now()}`;
+
+  const makeContext = (workdir) => ({
+    task: {
+      id: "task-vanish-1",
+      title: "Test vanished workdir",
+      scope: "src/backend/local-cc.ts",
+      acceptanceCriteria: ["vanished workdir recovers"],
+      agent: "claude",
+    },
+    plan: {
+      id: "plan-vanish-1",
+      originalRequest: "Test vanished workdir",
+      tasks: [],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    },
+    workdir,
+    ctx: {},
+    workerModel: "anthropic/claude-sonnet-4-6",
+    jobId,
+  });
+
+  localCc.__setLocalCcCommandExecutorForTests(async () => ({
+    exitCode: 0,
+    stdout: "Summary:\nDone.\n\nFiles changed:\n- file.ts\n\nTests run:\n0\n\nWarnings:",
+    stderr: "",
+  }));
+
+  try {
+    await localCc.localCcBackend.executeWorker(makeContext(oldWorkdir));
+
+    // Remove old workdir to simulate it vanishing
+    rmSync(oldWorkdir, { recursive: true, force: true });
+    assert.ok(!existsSync(oldWorkdir), "old workdir should be gone");
+
+    // Execute with new workdir — should recover, not throw
+    const result = await localCc.localCcBackend.executeWorker(makeContext(newWorkdir));
+    assert.equal(result.status, "waiting");
+
+    const state = localCc.readLocalCcJobState(jobId);
+    assert.equal(state.workdir, resolve(newWorkdir));
+  } finally {
+    localCc.__resetLocalCcCommandExecutorForTests();
+    rmSync(localCc.getLocalCcStateDir(jobId), { recursive: true, force: true });
+    rmSync(newWorkdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+async function testLocalCcTaskMismatchStillThrows() {
+  const { mod: localCc, cleanup } = loadTsModule("src/backend/local-cc.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-localcc-mismatch-"));
+  const jobId = `test-local-cc-task-mismatch-${Date.now()}`;
+
+  const makeContext = (taskId) => ({
+    task: {
+      id: taskId,
+      title: "Test task mismatch",
+      scope: "src/backend/local-cc.ts",
+      acceptanceCriteria: ["mismatch throws"],
+      agent: "claude",
+    },
+    plan: {
+      id: "plan-mismatch-1",
+      originalRequest: "Test mismatch",
+      tasks: [],
+      mode: "solo",
+      estimatedComplexity: "medium",
+      tier: 2,
+    },
+    workdir,
+    ctx: {},
+    workerModel: "anthropic/claude-sonnet-4-6",
+    jobId,
+  });
+
+  localCc.__setLocalCcCommandExecutorForTests(async () => ({
+    exitCode: 0,
+    stdout: "Summary:\nDone.\n\nFiles changed:\n\nTests run:\n\nWarnings:",
+    stderr: "",
+  }));
+
+  try {
+    await localCc.localCcBackend.executeWorker(makeContext("task-a"));
+
+    // Same jobId, different taskId — should error (caught by error boundary)
+    const result = await localCc.localCcBackend.executeWorker(makeContext("task-b"));
+    assert.equal(result.status, "error");
+    assert.ok(result.error.includes("task mismatch"), "should report task mismatch: " + result.error);
+  } finally {
+    localCc.__resetLocalCcCommandExecutorForTests();
+    rmSync(localCc.getLocalCcStateDir(jobId), { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
@@ -952,6 +1122,9 @@ const tests = [
   ["local-cc args include Claude effort flag", testLocalCcArgsIncludeClaudeEffort],
   ["local-cc child env prefers Claude credentials over gateway API key", testLocalCcChildEnvPrefersClaudeCredentialsOverGatewayApiKey],
   ["local-cc backend reports missing claude CLI clearly", testLocalCcBackendReportsMissingCliClearly],
+  ["local-cc workdir mismatch recovery migrates state", testLocalCcWorkdirMismatchRecovery],
+  ["local-cc workdir mismatch recovery handles vanished old dir", testLocalCcWorkdirMismatchRecoveryVanishedOldDir],
+  ["local-cc task mismatch still throws hard error", testLocalCcTaskMismatchStillThrows],
 ];
 
 (async () => {
