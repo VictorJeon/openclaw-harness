@@ -564,6 +564,46 @@ function testHarnessPromotesLaterSuccessAfterPlanViolation() {
   }
 }
 
+function testHarnessReadsSuccessFromStreamWhenResultFileIsMissing() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+  const stateDir = mkdtempSync(join(tmpdir(), "openclaw-harness-realtime-stream-success-"));
+
+  try {
+    writeFileSync(join(stateDir, "stream-1.jsonl"), [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Let me explore the codebase first." }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "## Plan\n\nTrivial change. Update function and test, then run npm test.",
+        permission_denials: [],
+        session_id: "sess-stream-1",
+        num_turns: 4,
+        total_cost_usd: 0.2,
+      }),
+      '{"type":"result","subtype":"success"',
+      "",
+    ].join("\n"), "utf8");
+
+    const latest = harnessExecute.__readLatestRealtimeResultForTests(stateDir);
+    assert.equal(latest.round, 1);
+    assert.equal(latest.sessionId, "sess-stream-1");
+    assert.equal(latest.subtype, "success");
+    assert.equal(latest.isError, false);
+    assert.equal(latest.resultText.includes("Trivial change"), true);
+    assert.equal(
+      harnessExecute.__classifyPlanViolationHandlingForTests(stateDir, "round-complete"),
+      "waiting",
+    );
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
 function testCheckpointMarksFailedWhenTaskFailsEarly() {
   const { mod: checkpointMod, cleanup } = loadTsModule("src/checkpoint.ts");
   const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-checkpoint-"));
@@ -1197,6 +1237,7 @@ const tests = [
   ["extractFilePaths captures root and nested repo files", testExtractFilePathsCapturesRootAndNestedFiles],
   ["realtime harness defers transient plan_violation during round-complete", testHarnessDefersTransientPlanViolationDuringRoundComplete],
   ["realtime harness promotes later success after plan_violation", testHarnessPromotesLaterSuccessAfterPlanViolation],
+  ["realtime harness reads success from stream when result file is missing", testHarnessReadsSuccessFromStreamWhenResultFileIsMissing],
   ["realtime harness skips CLAUDE.md check when project context file is absent", testHarnessSkipsClaudeMdCheckWhenProjectContextMissing],
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],

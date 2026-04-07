@@ -6887,24 +6887,59 @@ ${tailText(outputLog, 30, 2400)}`);
 function readLatestRealtimeResult(stateDir) {
   try {
     if (!(0, import_fs7.existsSync)(stateDir)) return null;
+    const candidates = [];
     const resultFiles = (0, import_fs7.readdirSync)(stateDir).filter((name) => /^result-\d+\.json$/.test(name)).sort((a, b) => extractRealtimeRound(a) - extractRealtimeRound(b));
-    if (resultFiles.length === 0) return null;
-    const latestFilename = resultFiles[resultFiles.length - 1];
-    const latest = JSON.parse((0, import_fs7.readFileSync)((0, import_path7.join)(stateDir, latestFilename), "utf-8"));
-    const permissionDenials = Array.isArray(latest.permission_denials) ? latest.permission_denials.map((entry) => typeof entry?.tool_name === "string" ? entry.tool_name : null).filter((value) => Boolean(value)) : [];
-    return {
-      sessionId: typeof latest.session_id === "string" ? latest.session_id : void 0,
-      resultText: typeof latest.result === "string" ? latest.result : void 0,
-      numTurns: typeof latest.num_turns === "number" ? latest.num_turns : void 0,
-      costUsd: typeof latest.total_cost_usd === "number" ? latest.total_cost_usd : void 0,
-      subtype: typeof latest.subtype === "string" ? latest.subtype : void 0,
-      isError: typeof latest.is_error === "boolean" ? latest.is_error : void 0,
-      round: extractRealtimeRound(latestFilename),
-      permissionDenials
-    };
+    for (const filename of resultFiles) {
+      const payload = JSON.parse((0, import_fs7.readFileSync)((0, import_path7.join)(stateDir, filename), "utf-8"));
+      candidates.push({
+        ...buildLatestRealtimeResult(payload, extractRealtimeRound(filename)),
+        sourcePriority: 2
+      });
+    }
+    const streamFiles = (0, import_fs7.readdirSync)(stateDir).filter((name) => /^stream-\d+\.jsonl$/.test(name)).sort((a, b) => extractRealtimeRound(a) - extractRealtimeRound(b));
+    for (const filename of streamFiles) {
+      const round = extractRealtimeRound(filename);
+      const lines = (0, import_fs7.readFileSync)((0, import_path7.join)(stateDir, filename), "utf-8").split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const payload = JSON.parse(trimmed);
+          if (payload?.type !== "result") continue;
+          candidates.push({
+            ...buildLatestRealtimeResult(payload, round),
+            sourcePriority: 1
+          });
+        } catch {
+          continue;
+        }
+      }
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      const roundDelta = (a.round ?? 0) - (b.round ?? 0);
+      if (roundDelta !== 0) return roundDelta;
+      return a.sourcePriority - b.sourcePriority;
+    });
+    const latest = candidates[candidates.length - 1];
+    const { sourcePriority: _sourcePriority, ...result } = latest;
+    return result;
   } catch {
     return null;
   }
+}
+function buildLatestRealtimeResult(payload, round) {
+  const permissionDenials = Array.isArray(payload?.permission_denials) ? payload.permission_denials.map((entry) => typeof entry?.tool_name === "string" ? entry.tool_name : null).filter((value) => Boolean(value)) : [];
+  return {
+    sessionId: typeof payload?.session_id === "string" ? payload.session_id : void 0,
+    resultText: typeof payload?.result === "string" ? payload.result : void 0,
+    numTurns: typeof payload?.num_turns === "number" ? payload.num_turns : void 0,
+    costUsd: typeof payload?.total_cost_usd === "number" ? payload.total_cost_usd : void 0,
+    subtype: typeof payload?.subtype === "string" ? payload.subtype : void 0,
+    isError: typeof payload?.is_error === "boolean" ? payload.is_error : void 0,
+    round,
+    permissionDenials
+  };
 }
 function recoverSuccessfulRealtimeTerminalState(stateDir, observedStatus) {
   const latestResult = readLatestRealtimeResult(stateDir);
@@ -6948,7 +6983,7 @@ function recoverCompletedRealtimeWorkerResult(taskId, jobId) {
   return buildRealtimeWorkerResult(taskId, status, summary, sessionId ?? jobId);
 }
 function extractRealtimeRound(filename) {
-  const match = filename.match(/^result-(\d+)\.json$/);
+  const match = filename.match(/^(?:result|stream)-(\d+)\.(?:json|jsonl)$/);
   return match ? parseInt(match[1], 10) : 0;
 }
 function readTextFileIfExists(path) {
