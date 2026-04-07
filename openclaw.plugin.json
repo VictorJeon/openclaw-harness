@@ -70,16 +70,6 @@
         "default": false,
         "description": "Skip ALL pre-launch safety guards. Use only for development/testing."
       },
-      "operationMode": {
-        "type": "string",
-        "default": "delegate",
-        "enum": [
-          "ask",
-          "delegate",
-          "autonomous"
-        ],
-        "description": "Harness operation mode. ask=all approvals, delegate=auto safe ops, autonomous=fully auto"
-      },
       "maxReviewLoops": {
         "type": "number",
         "default": 4,

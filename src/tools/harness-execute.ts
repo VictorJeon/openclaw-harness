@@ -25,7 +25,6 @@ import { prepareExecutionWorkspace, materializeExecutionWorkspace } from "../wor
 import type {
   OpenClawPluginToolContext,
   HarnessPlan,
-  OperationMode,
   ReviewResult,
   WorkerResult,
   CheckpointData,
@@ -68,19 +67,6 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       workdir: Type.Optional(
         Type.String({ description: "Working directory for the task" }),
       ),
-      mode: Type.Optional(
-        Type.Union(
-          [
-            Type.Literal("ask"),
-            Type.Literal("delegate"),
-            Type.Literal("autonomous"),
-          ],
-          {
-            description:
-              "Operation mode override. ask=all approvals, delegate=auto safe ops (default), autonomous=fully auto",
-          },
-        ),
-      ),
       tier_override: Type.Optional(
         Type.Union(
           [Type.Literal(0), Type.Literal(1), Type.Literal(2)],
@@ -89,12 +75,6 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       ),
       max_budget_usd: Type.Optional(
         Type.Number({ description: "Maximum budget in USD (default from config)" }),
-      ),
-      approved_plan_id: Type.Optional(
-        Type.String({
-          description:
-            "Plan ID from a previous approval-gated response. Pass this to skip the approval gate and execute the approved plan.",
-        }),
       ),
     }),
     async execute(_id: string, params: any) {
@@ -110,11 +90,9 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       }
 
       const workdir = params.workdir || ctx.workspaceDir || pluginConfig.defaultWorkdir || process.cwd();
-      const mode: OperationMode = params.mode ?? pluginConfig.operationMode ?? "delegate";
+      const mode = "autonomous" as const;
       const maxBudgetUsd = params.max_budget_usd ?? pluginConfig.defaultBudgetUsd ?? 5;
-      const autoResumeCheckpoint = !params.approved_plan_id
-        ? findRecoverableCheckpoint(params.request, workdir)
-        : null;
+      const autoResumeCheckpoint = findRecoverableCheckpoint(params.request, workdir);
 
       // Step 1: Route — classify request complexity
       const route = classifyRequest(params.request);
@@ -122,44 +100,11 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
 
       console.log(`[harness] Route: tier=${tier}, confidence=${route.confidence}, reason=${route.reason}`);
 
-      // Step 2: Approval gate
-      const isRiskyConfig = isRiskyTier0(params.request); // evaluate independently of tier
-
-      // If approved_plan_id provided, load and validate the persisted plan
-      let existingCheckpoint: CheckpointData | null = null;
-      if (params.approved_plan_id) {
-        existingCheckpoint = loadCheckpoint(params.approved_plan_id, workdir);
-        if (!existingCheckpoint) {
-          return {
-            isError: true,
-            content: [{
-              type: "text",
-              text: `Error: approved_plan_id "${params.approved_plan_id}" not found. It may have expired or the workdir doesn't match.`,
-            }],
-          };
-        }
-
-        // Verify the approved plan matches the current request
-        if (existingCheckpoint.plan.originalRequest !== params.request) {
-          return {
-            isError: true,
-            content: [{
-              type: "text",
-              text: `Error: approved_plan_id "${params.approved_plan_id}" was created for a different request. Cannot reuse approval across different requests.`,
-            }],
-          };
-        }
-      } else if (autoResumeCheckpoint) {
-        existingCheckpoint = autoResumeCheckpoint;
-      }
+      // Step 2: Autonomous-only execution (no approval gate)
+      const existingCheckpoint: CheckpointData | null = autoResumeCheckpoint;
 
       if (existingCheckpoint) {
-        // Execute the approved or auto-resumed plan directly
-        console.log(
-          params.approved_plan_id
-            ? `[harness] Executing approved plan: ${params.approved_plan_id}`
-            : `[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`,
-        );
+        console.log(`[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`);
         const plan = existingCheckpoint.plan;
         const runState = buildExecutionRunState(existingCheckpoint);
         if (runState.mode === "resumed" && existingCheckpoint.status !== "complete") {
@@ -180,26 +125,6 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
           content: [{
             type: "text",
             text: formatFinalResult(plan, route, taskResults, mode, existingCheckpoint, runState, materialized),
-          }],
-        };
-      }
-
-      // No approval token — check gates
-      const needsApproval =
-        (mode === "ask" && (tier > 0 || isRiskyConfig)) ||
-        (isRiskyConfig && mode !== "autonomous") ||
-        (mode === "delegate" && tier === 2);
-
-      if (needsApproval) {
-        const memoryContext = tier > 0 ? await loadPlanningMemory(workdir) : "";
-        const plan = await createExecutionPlan(params.request, tier > 0 ? tier : 1, memoryContext, workdir);
-        // Persist the plan so approved_plan_id can load it later
-        const checkpoint = initCheckpoint(plan, workdir);
-        checkpoint.status = "running"; // mark as awaiting approval
-        return {
-          content: [{
-            type: "text",
-            text: formatPlanForApproval(plan, route, mode),
           }],
         };
       }
@@ -1918,28 +1843,6 @@ function extractWarnings(output: string): string[] {
 
 // --- Risk detection ---
 
-const RISKY_CONFIG_PATTERNS = [
-  /\.env\b/i,
-  /\.plist\b/i,
-  /credentials/i,
-  /secrets?\b/i,
-  /\bapi[_-]?key/i,
-  /\btoken\b.*\b(수정|변경|update|change|set)\b/i,
-  /openclaw\.json/i,
-  /package\.json/i,
-  /tsconfig/i,
-  /config\.ya?ml/i,
-  /\.ya?ml\b.*\b(config|설정)/i,
-  /\b(settings|configuration)\.ya?ml/i,
-  /docker(file|compose)/i,
-  /nginx\.conf/i,
-  /\.gitignore/i,
-];
-
-function isRiskyTier0(request: string): boolean {
-  return RISKY_CONFIG_PATTERNS.some((p) => p.test(request));
-}
-
 // --- Prompt builders ---
 
 function buildWorkerPrompt(task: TaskSpec, plan: HarnessPlan): string {
@@ -1963,43 +1866,6 @@ function buildWorkerPrompt(task: TaskSpec, plan: HarnessPlan): string {
 
 // --- Formatters ---
 
-function formatPlanForApproval(
-  plan: HarnessPlan,
-  route: ReturnType<typeof classifyRequest>,
-  mode: OperationMode,
-): string {
-  const lines = [
-    `## Harness: Plan Requires Approval`,
-    ``,
-    `**Tier:** ${route.tier} (${route.confidence})`,
-    `**Mode:** ${mode}`,
-    `**Plan ID:** ${plan.id}`,
-    `**Tasks:** ${plan.tasks.length} (${plan.mode})`,
-    ...formatPlannerMetadata(plan.plannerMetadata),
-    ``,
-    `### Tasks`,
-  ];
-
-  for (const task of plan.tasks) {
-    lines.push(
-      ``,
-      `**${task.id}: ${task.title}**`,
-      `- Scope: ${task.scope}`,
-      `- Agent: ${task.agent}`,
-      `- Acceptance criteria:`,
-      ...task.acceptanceCriteria.map((c) => `  - ${c}`),
-    );
-  }
-
-  lines.push(
-    ``,
-    `---`,
-    `To approve, re-call with \`approved_plan_id: "${plan.id}"\`.`,
-    `Or modify the request and re-run.`,
-  );
-  return lines.join("\n");
-}
-
 function formatPlannerMetadata(metadata?: HarnessPlan["plannerMetadata"]): string[] {
   if (!metadata) return [];
 
@@ -2018,7 +1884,7 @@ function formatFinalResult(
   plan: HarnessPlan,
   route: ReturnType<typeof classifyRequest>,
   results: TaskExecutionResult[],
-  mode: OperationMode,
+  mode: "autonomous",
   checkpoint: CheckpointData,
   runState: ExecutionRunState,
   materialized?: { applied: boolean; patchPath?: string; error?: string } | null,

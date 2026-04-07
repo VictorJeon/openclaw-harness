@@ -104,7 +104,6 @@ export interface PluginConfig {
   skipSafetyChecks?: boolean;
 
   // Harness-specific config
-  operationMode: OperationMode;
   maxReviewLoops: number;
   reviewModel?: string;
   plannerModel?: string;
@@ -121,7 +120,7 @@ export interface PluginConfig {
 
 // --- Harness types ---
 
-export type OperationMode = "ask" | "delegate" | "autonomous";
+export type OperationMode = "autonomous";
 
 export type Tier = 0 | 1 | 2;
 
