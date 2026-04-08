@@ -215,6 +215,23 @@ function testReviewerBackendSelection() {
   }
 }
 
+function testEmbeddedReviewerProviderResolution() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+
+  try {
+    const codexTarget = harnessExecute.resolveEmbeddedReviewerProviderAndModel("gpt-5.4", "sonnet");
+    assert.deepEqual(codexTarget, { provider: "openai-codex", model: "gpt-5.4" });
+
+    const claudeTarget = harnessExecute.resolveEmbeddedReviewerProviderAndModel(
+      "anthropic/claude-sonnet-4-6",
+      "gpt-5.4",
+    );
+    assert.deepEqual(claudeTarget, { provider: "anthropic", model: "claude-sonnet-4-6" });
+  } finally {
+    cleanup();
+  }
+}
+
 function testClaudeModelResolutionNormalizesCanonicalRefs() {
   const tempDir = mkdtempSync(join(tmpdir(), "openclaw-harness-model-test-"));
   const configPath = join(tempDir, "openclaw.json");
@@ -1387,6 +1404,7 @@ const tests = [
   ["model planner falls back to heuristic after planner failures", testModelPlannerFallsBackToHeuristic],
   ["model planner merges implementation, tests, and verification", testModelPlannerMergesImplementationAndTests],
   ["reviewer backend selection routes GPT reviewer to Codex", testReviewerBackendSelection],
+  ["embedded reviewer provider resolution keeps Codex OAuth lane", testEmbeddedReviewerProviderResolution],
   ["claude model resolution normalizes canonical refs", testClaudeModelResolutionNormalizesCanonicalRefs],
   ["reviewer command uses Codex read-only path", testReviewerCommandUsesCodexReadOnlyPath],
   ["reviewer command sets Codex reasoning effort", testReviewerCommandSetsCodexReasoningEffort],

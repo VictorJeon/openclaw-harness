@@ -5333,42 +5333,6 @@ function formatEscalation(plan, state, task) {
   return lines.join("\n");
 }
 
-// src/reviewer-runner.ts
-var import_child_process2 = require("child_process");
-var import_fs5 = require("fs");
-var import_os4 = require("os");
-var import_path5 = require("path");
-
-// node_modules/nanoid/index.js
-var import_crypto2 = __toESM(require("crypto"), 1);
-
-// node_modules/nanoid/url-alphabet/index.js
-var urlAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
-
-// node_modules/nanoid/index.js
-var POOL_SIZE_MULTIPLIER = 128;
-var pool;
-var poolOffset;
-var fillPool = (bytes) => {
-  if (!pool || pool.length < bytes) {
-    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
-    import_crypto2.default.randomFillSync(pool);
-    poolOffset = 0;
-  } else if (poolOffset + bytes > pool.length) {
-    import_crypto2.default.randomFillSync(pool);
-    poolOffset = 0;
-  }
-  poolOffset += bytes;
-};
-var nanoid = (size = 21) => {
-  fillPool(size |= 0);
-  let id = "";
-  for (let i = poolOffset - size; i < poolOffset; i++) {
-    id += urlAlphabet[pool[i] & 63];
-  }
-  return id;
-};
-
 // src/model-resolution.ts
 var import_fs4 = require("fs");
 var import_os3 = require("os");
@@ -5484,6 +5448,42 @@ function resolveModelAlias(model) {
   const canonical = trimmed.includes("/") ? trimmed : aliases.get(trimmed.toLowerCase()) ?? trimmed;
   return normalizeClaudeLaunchModel(canonical);
 }
+
+// src/reviewer-runner.ts
+var import_child_process2 = require("child_process");
+var import_fs5 = require("fs");
+var import_os4 = require("os");
+var import_path5 = require("path");
+
+// node_modules/nanoid/index.js
+var import_crypto2 = __toESM(require("crypto"), 1);
+
+// node_modules/nanoid/url-alphabet/index.js
+var urlAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
+
+// node_modules/nanoid/index.js
+var POOL_SIZE_MULTIPLIER = 128;
+var pool;
+var poolOffset;
+var fillPool = (bytes) => {
+  if (!pool || pool.length < bytes) {
+    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
+    import_crypto2.default.randomFillSync(pool);
+    poolOffset = 0;
+  } else if (poolOffset + bytes > pool.length) {
+    import_crypto2.default.randomFillSync(pool);
+    poolOffset = 0;
+  }
+  poolOffset += bytes;
+};
+var nanoid = (size = 21) => {
+  fillPool(size |= 0);
+  let id = "";
+  for (let i = poolOffset - size; i < poolOffset; i++) {
+    id += urlAlphabet[pool[i] & 63];
+  }
+  return id;
+};
 
 // src/reviewer-runner.ts
 function normalizeCodexReasoningEffort(level) {
@@ -6814,6 +6814,10 @@ async function runEmbeddedRealtimePlanReview(params) {
   }
   const latestResult = readLatestRealtimeResult(params.stateDir);
   let retryReason = "";
+  const embeddedReviewerTarget = resolveEmbeddedReviewerProviderAndModel(
+    pluginConfig.reviewModel,
+    pluginConfig.defaultModel
+  );
   let lastError = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
     const tempDir = (0, import_fs7.mkdtempSync)((0, import_path7.join)((0, import_os6.tmpdir)(), "harness-plan-review-"));
@@ -6836,6 +6840,8 @@ async function runEmbeddedRealtimePlanReview(params) {
         agentDir,
         config: cfg,
         prompt,
+        provider: embeddedReviewerTarget.provider,
+        model: embeddedReviewerTarget.model,
         timeoutMs,
         runId: (0, import_crypto3.randomUUID)(),
         trigger: "manual",
@@ -7247,6 +7253,45 @@ function formatRealtimeFailureForCaller(ctx, workdir, detailedError) {
 }
 function resolveRealtimeModel(workerModel) {
   return workerModel.toLowerCase().includes("opus") ? "opus" : "sonnet";
+}
+function resolveSubagentProviderAndModel(requestedModel, fallback) {
+  const raw = (requestedModel ?? "").trim();
+  const lower = raw.toLowerCase();
+  if (!raw) {
+    return fallback;
+  }
+  if (raw.includes("/")) {
+    const [provider, model] = raw.split("/", 2);
+    if (provider && model) {
+      return { provider, model };
+    }
+  }
+  if (lower === "codex" || lower === "gpt5.4" || lower === "gpt-5.4" || lower === "gpt") {
+    return { provider: "openai-codex", model: "gpt-5.4" };
+  }
+  if (lower === "opus" || lower === "opus46" || lower === "claude-opus-4-6") {
+    return { provider: "anthropic", model: "claude-opus-4-6" };
+  }
+  if (lower === "claude" || lower === "sonnet" || lower === "sonnet46" || lower === "claude-sonnet-4-6") {
+    return { provider: "anthropic", model: "claude-sonnet-4-6" };
+  }
+  if (lower.includes("codex") || lower.startsWith("gpt")) {
+    return { provider: "openai-codex", model: "gpt-5.4" };
+  }
+  if (lower.includes("opus")) {
+    return { provider: "anthropic", model: "claude-opus-4-6" };
+  }
+  if (lower.includes("claude") || lower.includes("sonnet")) {
+    return { provider: "anthropic", model: "claude-sonnet-4-6" };
+  }
+  return fallback;
+}
+function resolveEmbeddedReviewerProviderAndModel(reviewModel, fallbackModel) {
+  const normalizedModel = resolveModelAlias(reviewModel ?? fallbackModel) ?? reviewModel?.trim() ?? fallbackModel?.trim() ?? "openai-codex/gpt-5.4";
+  return resolveSubagentProviderAndModel(normalizedModel, {
+    provider: "openai-codex",
+    model: "gpt-5.4"
+  });
 }
 async function waitForSessionEnd(sessionId) {
   const activeSessionManager = requireHarnessSessionManager();

@@ -20,6 +20,7 @@ import {
 } from "../checkpoint";
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
+import { resolveModelAlias } from "../model-resolution";
 import { resolveReviewerExecutionTarget, runReviewerWithCodexCli } from "../reviewer-runner";
 import { prepareExecutionWorkspace, materializeExecutionWorkspace } from "../workspace-isolation";
 import type {
@@ -1358,6 +1359,10 @@ async function runEmbeddedRealtimePlanReview(params: {
 
   const latestResult = readLatestRealtimeResult(params.stateDir);
   let retryReason = "";
+  const embeddedReviewerTarget = resolveEmbeddedReviewerProviderAndModel(
+    pluginConfig.reviewModel,
+    pluginConfig.defaultModel,
+  );
 
   let lastError: string | null = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
@@ -1388,6 +1393,8 @@ async function runEmbeddedRealtimePlanReview(params: {
         agentDir,
         config: cfg,
         prompt,
+        provider: embeddedReviewerTarget.provider,
+        model: embeddedReviewerTarget.model,
         timeoutMs,
         runId: randomUUID(),
         trigger: "manual",
@@ -2065,6 +2072,21 @@ function resolveSubagentProviderAndModel(
   }
 
   return fallback;
+}
+
+export function resolveEmbeddedReviewerProviderAndModel(
+  reviewModel?: string,
+  fallbackModel?: string,
+): { provider: string; model: string } {
+  const normalizedModel = resolveModelAlias(reviewModel ?? fallbackModel)
+    ?? reviewModel?.trim()
+    ?? fallbackModel?.trim()
+    ?? "openai-codex/gpt-5.4";
+
+  return resolveSubagentProviderAndModel(normalizedModel, {
+    provider: "openai-codex",
+    model: "gpt-5.4",
+  });
 }
 
 function buildHarnessSubagentSessionKey(
