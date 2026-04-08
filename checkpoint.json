@@ -1,0 +1,20 @@
+{
+  "task": "openclaw-harness-review-only-lane",
+  "status": "complete",
+  "totalSteps": 7,
+  "completedSteps": 7,
+  "currentStep": "done",
+  "completedFiles": [
+    "/Users/nova/projects/openclaw-harness/src/tools/harness-execute.ts",
+    "/Users/nova/projects/openclaw-harness/src/shared.ts",
+    "/Users/nova/projects/openclaw-harness/src/review-loop.ts",
+    "/Users/nova/projects/openclaw-harness/scripts/run-tests.js",
+    "/Users/nova/projects/openclaw-harness/README.md",
+    "/Users/nova/projects/openclaw-harness/docs/ARCHITECTURE.md",
+    "/Users/nova/.openclaw/workspace-nova/scripts/claude-realtime.sh",
+    "/Users/nova/.openclaw/workspace-nova/scripts/cc-implementation-review.sh"
+  ],
+  "nextAction": "fresh smoke test: verify waiting → Codex review → DONE end-to-end",
+  "fixSummary": "path translation bug fixed: Mac Mini workdir saved to Hetzner state dir at launch, SSH-back reads local-workdir; dead runCodexRealtimeImplementationReview removed from harness-execute.ts",
+  "lastUpdated": "2026-04-08T18:00:00Z"
+}

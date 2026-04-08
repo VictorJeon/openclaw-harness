@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { basename, join, relative, resolve } from "path";
 import { Type } from "@sinclair/typebox";
@@ -76,6 +76,9 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       max_budget_usd: Type.Optional(
         Type.Number({ description: "Maximum budget in USD (default from config)" }),
       ),
+      reviewOnly: Type.Optional(
+        Type.Boolean({ description: "Skip planner/worker and review existing local changes only" }),
+      ),
     }),
     async execute(_id: string, params: any) {
       const activeSessionManager = getSessionManager();
@@ -92,6 +95,12 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       const workdir = params.workdir || ctx.workspaceDir || pluginConfig.defaultWorkdir || process.cwd();
       const mode = "autonomous" as const;
       const maxBudgetUsd = params.max_budget_usd ?? pluginConfig.defaultBudgetUsd ?? 5;
+
+      // Review-only lane: skip planner/worker, review existing local changes
+      if (params.reviewOnly) {
+        return await executeReviewOnly(params.request, workdir, ctx);
+      }
+
       const autoResumeCheckpoint = findRecoverableCheckpoint(params.request, workdir);
 
       // Step 1: Route — classify request complexity
@@ -190,6 +199,192 @@ async function createExecutionPlan(
   return await buildModelPlan(request, memoryContext, workdir, undefined, tier);
 }
 
+// --- Review-only lane ---
+
+/**
+ * Execute a review-only run: skip planner/worker, synthesize a WorkerResult
+ * from local git changes, and run the existing reviewer path.
+ */
+async function executeReviewOnly(
+  request: string,
+  workdir: string,
+  ctx: OpenClawPluginToolContext,
+) {
+  const { changedFiles, diffStat } = await collectLocalChanges(workdir);
+
+  if (changedFiles.length === 0) {
+    return {
+      isError: true,
+      content: [{
+        type: "text",
+        text: `Error: No local changes found in ${workdir}. Nothing to review.`,
+      }],
+    };
+  }
+
+  const taskId = "review-1";
+  const planId = `review-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const task: TaskSpec = {
+    id: taskId,
+    title: request.slice(0, 120),
+    scope: workdir,
+    acceptanceCriteria: [request],
+    agent: "codex",
+  };
+
+  const syntheticWorkerResult: WorkerResult = {
+    taskId,
+    status: "completed",
+    summary: diffStat || `${changedFiles.length} file(s) changed locally`,
+    filesChanged: changedFiles,
+    testsRun: 0,
+    warnings: [],
+  };
+
+  const plan: HarnessPlan = {
+    id: planId,
+    originalRequest: request,
+    tasks: [task],
+    mode: "solo",
+    estimatedComplexity: "low",
+    tier: 0,
+  };
+
+  // Resolve reviewer backend (same logic as normal path)
+  const reviewModel = pluginConfig.reviewModel ?? "codex";
+  const reviewerReasoningEffort = pluginConfig.reviewerReasoningEffort;
+  const reviewerTarget = resolveReviewerExecutionTarget(reviewModel, pluginConfig.defaultModel);
+
+  // Run review loop (no fix loop — reviewer is read-only)
+  const reviewLoop = initReviewLoop(taskId);
+  let reviewResult: ReviewResult | null = null;
+  let reviewerRetryCount = 0;
+
+  while (true) {
+    const basePrompt = buildReviewRequest(task, syntheticWorkerResult, request, reviewLoop);
+    const reviewPrompt = reviewerRetryCount === 0
+      ? basePrompt
+      : [basePrompt, ``, `### Retry Instructions`, `Your previous response was malformed.`, `Return only the single JSON object required by the system prompt.`].join("\n");
+
+    let reviewOutput = "";
+
+    if (reviewerTarget.backend === "codex-cli") {
+      const codexRun = await runReviewerWithCodexCli({
+        prompt: reviewPrompt,
+        workdir,
+        model: reviewerTarget.launchModel,
+        reasoningEffort: reviewerReasoningEffort,
+      });
+      reviewOutput = codexRun.output;
+    } else {
+      throw new Error(
+        `Direct-session reviewer fallback is disabled for review-only mode. Configure reviewModel to a Codex-backed target; current backend=${reviewerTarget.backend}.`,
+      );
+    }
+
+    console.log(`[harness] Review-only reviewer done: retry=${reviewerRetryCount}, backend=${reviewerTarget.backend}`);
+
+    reviewResult = parseReviewOutput(reviewOutput, taskId);
+    if (!reviewResult.retryReviewer) break;
+
+    reviewerRetryCount++;
+    if (reviewerRetryCount >= 3) {
+      return {
+        isError: true,
+        content: [{
+          type: "text",
+          text: `Error: Reviewer output could not be parsed after 3 attempts in review-only mode.`,
+        }],
+      };
+    }
+
+    console.warn(`[harness] Review-only reviewer output malformed: retry=${reviewerRetryCount}/3`);
+  }
+
+  if (!reviewResult) {
+    throw new Error("Reviewer result missing after retry loop");
+  }
+
+  const action = processReviewResult(reviewLoop, reviewResult);
+  // No fix loop — report result as-is
+  return {
+    content: [{
+      type: "text",
+      text: formatReviewOnlyResult(plan, syntheticWorkerResult, reviewResult, reviewLoop, action.action),
+    }],
+  };
+}
+
+/**
+ * Collect changed files and diff stat from the workdir via git.
+ * Includes both staged and unstaged changes.
+ */
+export async function collectLocalChanges(workdir: string): Promise<{
+  changedFiles: string[];
+  diffStat: string;
+}> {
+  // Check both staged and unstaged changes
+  const [diffNames, diffStat] = await Promise.all([
+    execFileCapture("git", ["diff", "--name-only", "HEAD"], workdir, 15_000)
+      .catch(() => execFileCapture("git", ["diff", "--name-only"], workdir, 15_000))
+      .catch(() => ({ exitCode: 1, stdout: "", stderr: "" })),
+    execFileCapture("git", ["diff", "--stat", "HEAD"], workdir, 15_000)
+      .catch(() => execFileCapture("git", ["diff", "--stat"], workdir, 15_000))
+      .catch(() => ({ exitCode: 1, stdout: "", stderr: "" })),
+  ]);
+
+  // Also pick up untracked files
+  const untracked = await execFileCapture(
+    "git", ["ls-files", "--others", "--exclude-standard"], workdir, 15_000,
+  ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+
+  const changedFiles = [
+    ...diffNames.stdout.trim().split("\n").filter(Boolean),
+    ...untracked.stdout.trim().split("\n").filter(Boolean),
+  ];
+  const uniqueFiles = [...new Set(changedFiles)];
+
+  return {
+    changedFiles: uniqueFiles,
+    diffStat: diffStat.stdout.trim(),
+  };
+}
+
+function formatReviewOnlyResult(
+  plan: HarnessPlan,
+  workerResult: WorkerResult,
+  reviewResult: ReviewResult,
+  reviewLoop: ReturnType<typeof initReviewLoop>,
+  action: string,
+): string {
+  const passed = reviewResult.result === "pass";
+  const lines = [
+    `## Harness: Review Only — ${passed ? "Pass" : "Gaps Found"}`,
+    ``,
+    `**Mode:** review-only | **Plan:** ${plan.id}`,
+    `**Changed files:** ${workerResult.filesChanged.length}`,
+    `**Review loops:** ${reviewLoop.history.length}`,
+    `**Result:** ${reviewResult.result}${reviewResult.gaps.length > 0 ? ` (${reviewResult.gaps.length} gap${reviewResult.gaps.length > 1 ? "s" : ""})` : ""}`,
+    ``,
+    `### Changed Files`,
+    ...workerResult.filesChanged.map((f) => `- ${f}`),
+    ``,
+    `### Review Result`,
+  ];
+
+  if (passed) {
+    lines.push(`No gaps detected. All acceptance criteria appear to be met.`);
+  } else {
+    for (const gap of reviewResult.gaps) {
+      lines.push(`- **${gap.type}:** ${gap.evidence}`);
+      if (gap.fixHint) lines.push(`  Fix hint: ${gap.fixHint}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 // --- Orchestration ---
 
 interface TaskExecutionResult {
@@ -244,8 +439,11 @@ export interface RealtimeExecutionResult extends RealtimeLaunchResult {
 }
 
 type PlanReviewVerdict = "PROCEED" | "REVISE" | "DONE" | "ABORT";
+type EmbeddedRealtimeReviewKind = "plan";
+type RealtimeCheckpointReviewMode = "embedded-plan";
 
 interface EmbeddedPlanReviewResult {
+  kind: EmbeddedRealtimeReviewKind;
   verdict: PlanReviewVerdict;
   body: string;
   feedback: string;
@@ -760,6 +958,7 @@ export async function executeRealtimeTask(
   jobId: string,
 ): Promise<RealtimeExecutionResult> {
   const resolvedWorkdir = resolve(workdir);
+  assertRealtimeProjectContext(resolvedWorkdir);
   const spec = buildRealtimeSpec(task, plan, resolvedWorkdir);
   const realtimeModel = resolveRealtimeModel(workerModel);
   const notifyAgent = resolveRealtimeNotifyAgent(ctx, resolvedWorkdir);
@@ -863,7 +1062,6 @@ async function launchRealtimeJob(
     "--model",
     model,
     ...(effort ? ["--effort", effort] : []),
-    ...(shouldSkipClaudeMdCheck(workdir) ? ["--skip-claude-md"] : []),
     "--notify-agent",
     notifyAgent,
   ];
@@ -963,6 +1161,29 @@ function sanitizeCodexPromptOutput(stdout: string): string {
     .trim();
 }
 
+function realtimeCheckpointReviewModeForStatus(
+  status: string | null | undefined,
+  _goal: "round-complete" | "terminal",
+): RealtimeCheckpointReviewMode | null {
+  if (status === "plan_waiting") {
+    return "embedded-plan";
+  }
+  return null;
+}
+
+function reviewArtifactPrefix(kind: EmbeddedRealtimeReviewKind | "implementation", round: number): string {
+  return kind === "plan"
+    ? `plan-review-round-${round}`
+    : `implementation-review-round-${round}`;
+}
+
+export function __realtimeCheckpointReviewModeForTests(
+  status: string | null | undefined,
+  goal: "round-complete" | "terminal" = "round-complete",
+): RealtimeCheckpointReviewMode | null {
+  return realtimeCheckpointReviewModeForStatus(status, goal);
+}
+
 async function waitForRealtimeTerminalState(
   stateDir: string,
   jobId: string,
@@ -974,7 +1195,7 @@ async function waitForRealtimeTerminalState(
 ): Promise<{ status: string; summary: string; sessionId?: string }> {
   const startedAt = Date.now();
   let lastStatus = readRealtimeStatus(stateDir) ?? "launching";
-  const reviewedRounds = new Set<number>();
+  const reviewedCheckpoints = new Set<string>();
 
   while (Date.now() - startedAt < REALTIME_MAX_WAIT_MS) {
     const currentStatus = readRealtimeStatus(stateDir);
@@ -982,10 +1203,16 @@ async function waitForRealtimeTerminalState(
       lastStatus = currentStatus;
     }
 
-    if (lastStatus === "plan_waiting") {
+    const reviewMode = realtimeCheckpointReviewModeForStatus(lastStatus, goal);
+    if (reviewMode) {
       const currentRound = detectLatestRealtimeRound(stateDir);
-      if (!reviewedRounds.has(currentRound)) {
-        reviewedRounds.add(currentRound);
+      const reviewKey = `${reviewMode}:${currentRound}`;
+      if (!reviewedCheckpoints.has(reviewKey)) {
+        reviewedCheckpoints.add(reviewKey);
+        const artifactPrefix = reviewArtifactPrefix(
+          reviewMode === "embedded-plan" ? "plan" : "implementation",
+          currentRound,
+        );
         try {
           const review = await runEmbeddedRealtimePlanReview({
             stateDir,
@@ -995,14 +1222,16 @@ async function waitForRealtimeTerminalState(
             plan,
             ctx,
             workdir,
+            kind: "plan",
           });
 
-          writeFileSync(join(stateDir, `plan-review-round-${currentRound}.raw.txt`), review.rawText, "utf8");
-          writeFileSync(join(stateDir, `plan-review-round-${currentRound}.feedback.txt`), review.feedback, "utf8");
+          writeFileSync(join(stateDir, `${artifactPrefix}.raw.txt`), review.rawText, "utf8");
+          writeFileSync(join(stateDir, `${artifactPrefix}.feedback.txt`), review.feedback, "utf8");
           writeFileSync(
-            join(stateDir, `plan-review-round-${currentRound}.source.txt`),
+            join(stateDir, `${artifactPrefix}.source.txt`),
             [
               "source=embedded-agent",
+              `kind=${review.kind}`,
               `agent=${ctx.agentId ?? ctx.agentAccountId ?? "main"}`,
               `reviewerSessionId=${review.reviewerSessionId}`,
               `verdict=${review.verdict}`,
@@ -1012,31 +1241,35 @@ async function waitForRealtimeTerminalState(
 
           await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, review.feedback);
           console.log(
-            `[harness] Embedded plan review sent: job=${jobId}, round=${currentRound}, verdict=${review.verdict}, reviewer=${review.reviewerSessionId}`,
+            `[harness] Embedded ${review.kind} review sent: job=${jobId}, round=${currentRound}, verdict=${review.verdict}, reviewer=${review.reviewerSessionId}`,
           );
         } catch (err: any) {
           const detail = `Embedded caller-agent plan review failed for ${jobId} round ${currentRound}: ${err?.message ?? String(err)}`;
-          writeFileSync(join(stateDir, `plan-review-round-${currentRound}.error.txt`), detail + "\n", "utf8");
+          writeFileSync(join(stateDir, `${artifactPrefix}.error.txt`), detail + "\n", "utf8");
           try {
             await writeRealtimeFeedback(REALTIME_REMOTE_HOST, stateDir, "ABORT");
           } catch (feedbackErr: any) {
             console.warn(
-              `[harness] Failed to send ABORT after embedded plan-review error: ${feedbackErr?.message ?? String(feedbackErr)}`,
+              `[harness] Failed to send ABORT after embedded plan review error: ${feedbackErr?.message ?? String(feedbackErr)}`,
             );
           }
           return {
             status: "error:plan-review",
-            ...buildRealtimeSummary(stateDir, "error:plan-review", detail),
+            ...buildRealtimeSummary(
+              stateDir,
+              "error:plan-review",
+              detail,
+            ),
           };
         }
       }
+      await sleep(REALTIME_POLL_INTERVAL_MS);
+      continue;
     }
 
     if (goal === "round-complete" && lastStatus === "waiting") {
-      return {
-        status: lastStatus,
-        ...buildRealtimeSummary(stateDir, lastStatus),
-      };
+      await sleep(REALTIME_POLL_INTERVAL_MS);
+      continue;
     }
 
     if (lastStatus === "plan_violation") {
@@ -1099,6 +1332,7 @@ async function runEmbeddedRealtimePlanReview(params: {
   plan: HarnessPlan;
   ctx: OpenClawPluginToolContext;
   workdir: string;
+  kind: EmbeddedRealtimeReviewKind;
 }): Promise<EmbeddedPlanReviewResult> {
   const runtime = getPluginRuntime();
   if (!runtime?.agent?.runEmbeddedPiAgent || !runtime?.config?.loadConfig) {
@@ -1163,12 +1397,13 @@ async function runEmbeddedRealtimePlanReview(params: {
 
       const rawText = collectEmbeddedPayloadText(result?.payloads);
       writeFileSync(
-        join(params.stateDir, `plan-review-round-${params.round}.attempt-${attempt}.txt`),
+        join(params.stateDir, `${reviewArtifactPrefix("plan", params.round)}.attempt-${attempt}.txt`),
         rawText || "",
         "utf8",
       );
 
       const parsed = parseEmbeddedPlanReviewResponse(rawText);
+
       const feedback = parsed.verdict === "DONE"
         ? "DONE"
         : parsed.verdict === "ABORT"
@@ -1181,6 +1416,7 @@ async function runEmbeddedRealtimePlanReview(params: {
       }
 
       return {
+        kind: params.kind,
         verdict: parsed.verdict,
         body: parsed.body,
         feedback,
@@ -1196,7 +1432,7 @@ async function runEmbeddedRealtimePlanReview(params: {
       }
       const backoffMs = Math.min(5000 * attempt, 15000);
       console.warn(
-        `[harness] Embedded plan review transient failure: job=${params.jobId}, round=${params.round}, attempt=${attempt}/4, retryInMs=${backoffMs}, error=${message}`,
+        `[harness] Embedded ${params.kind} review transient failure: job=${params.jobId}, round=${params.round}, attempt=${attempt}/4, retryInMs=${backoffMs}, error=${message}`,
       );
       await sleep(backoffMs);
       continue;
@@ -1205,7 +1441,7 @@ async function runEmbeddedRealtimePlanReview(params: {
     }
   }
 
-  throw new Error(lastError ?? `embedded plan review did not return a valid verdict/body for ${params.jobId} round ${params.round}`);
+  throw new Error(lastError ?? `embedded ${params.kind} review did not return a valid verdict/body for ${params.jobId} round ${params.round}`);
 }
 
 function buildEmbeddedPlanReviewPrompt(params: {
@@ -1218,6 +1454,7 @@ function buildEmbeddedPlanReviewPrompt(params: {
   workdir: string;
   agentId: string;
   latestResultText: string;
+  kind: EmbeddedRealtimeReviewKind;
   retryReason?: string;
 }): string {
   const latestResult = params.latestResultText.trim()
@@ -1227,22 +1464,32 @@ function buildEmbeddedPlanReviewPrompt(params: {
     ? params.task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")
     : "- Complete the requested change without expanding scope.";
 
+  const isPlanReview = params.kind === "plan";
+
   return [
-    `You are the OpenClaw agent \`${params.agentId}\` reviewing a Claude Code planning checkpoint for the coding harness.`,
+    `You are the OpenClaw agent \`${params.agentId}\` reviewing a Claude Code ${isPlanReview ? "planning" : "implementation"} checkpoint for the coding harness.`,
     `The harness was invoked by this same agent, so the verdict and feedback must come from you directly.`,
     params.retryReason ? `Retry requirement: ${params.retryReason}` : "",
     "",
     "Return format (strict):",
     "- First line must be exactly one of: VERDICT: PROCEED | VERDICT: REVISE | VERDICT: DONE | VERDICT: ABORT",
+    isPlanReview
+      ? "- For plan checkpoints, use PROCEED to approve the plan, REVISE to request a different implementation path, DONE only if the task is already finished, and ABORT if the task must stop."
+      : "- For implementation checkpoints, use DONE if the task satisfies the acceptance criteria, REVISE to request concrete follow-up changes, and ABORT only if the task must stop. Do not use PROCEED for implementation checkpoints.",
     "- If the verdict is PROCEED or REVISE, the body must be 220-1200 characters, concrete, and addressed to Claude Code.",
-    "- For PROCEED, restate the approved path, scope, constraints, and validation steps.",
-    "- For REVISE, explain exactly what is wrong and what Claude Code must change before implementing.",
+    isPlanReview
+      ? "- For PROCEED, restate the approved path, scope, constraints, and validation steps."
+      : "- For REVISE, explain exactly what is wrong in the current implementation and what Claude Code must change next.",
+    isPlanReview
+      ? "- For REVISE, explain exactly what is wrong and what Claude Code must change before implementing."
+      : "- For DONE, body is optional; use it only if a short justification materially helps.",
     "- For DONE or ABORT, body is optional.",
     "- No markdown fences. No intro. No notes to Mason. No tool calls.",
     "",
     "Job context:",
     `- jobId: ${params.jobId}`,
     `- round: ${params.round}`,
+    `- checkpoint kind: ${params.kind}`,
     `- repo/workdir: ${params.workdir}`,
     `- original request: ${params.plan.originalRequest}`,
     `- task title: ${params.task.title}`,
@@ -1323,6 +1570,20 @@ async function writeRealtimeFeedback(remoteHost: string, stateDir: string, feedb
   if (result.exitCode !== 0) {
     const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
     throw new Error(`failed to write realtime feedback to ${remoteHost}:${stateDir}${output ? `\n${output}` : ""}`);
+  }
+}
+
+async function syncRealtimeStateFromRemote(remoteHost: string, stateDir: string): Promise<void> {
+  mkdirSync(stateDir, { recursive: true });
+  const result = await execFileCapture(
+    "scp",
+    ["-q", "-r", `${remoteHost}:${stateDir}/.`, `${stateDir}/`],
+    process.cwd(),
+    30000,
+  );
+  if (result.exitCode !== 0) {
+    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    throw new Error(`failed to sync realtime state from ${remoteHost}:${stateDir}${output ? `\n${output}` : ""}`);
   }
 }
 
@@ -1665,12 +1926,35 @@ function buildRealtimeJobId(planId: string, taskId: string): string {
   return `harness-${planPart || "plan"}-${taskPart || "task"}-${Date.now()}`;
 }
 
-function shouldSkipClaudeMdCheck(workdir: string): boolean {
-  return !existsSync(join(workdir, "CLAUDE.md"));
+function hasRealtimeProjectContext(workdir: string): boolean {
+  return existsSync(join(workdir, "CLAUDE.md")) || existsSync(join(workdir, ".claude", "CLAUDE.md"));
 }
 
-export function __shouldSkipClaudeMdCheckForTests(workdir: string): boolean {
-  return shouldSkipClaudeMdCheck(workdir);
+function assertRealtimeProjectContext(workdir: string): void {
+  if (hasRealtimeProjectContext(workdir)) {
+    return;
+  }
+  throw new Error(
+    [
+      `Realtime worker requires project context before launch: ${workdir}`,
+      "Missing CLAUDE.md (or .claude/CLAUDE.md).",
+      "Create a project context file before using harness_execute with the realtime worker.",
+    ].join("\n"),
+  );
+}
+
+export function __hasRealtimeProjectContextForTests(workdir: string): boolean {
+  return hasRealtimeProjectContext(workdir);
+}
+
+export function __formatReviewOnlyResultForTests(
+  plan: HarnessPlan,
+  workerResult: WorkerResult,
+  reviewResult: ReviewResult,
+  reviewLoop: ReturnType<typeof initReviewLoop>,
+  action: string,
+): string {
+  return formatReviewOnlyResult(plan, workerResult, reviewResult, reviewLoop, action);
 }
 
 function sanitizeRealtimeFragment(value: string): string {
