@@ -1,6 +1,6 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
-import { tmpdir } from "os";
+import { homedir } from "os";
 import { basename, dirname, join, relative, resolve } from "path";
 
 export interface PreparedExecutionWorkspace {
@@ -107,8 +107,22 @@ function configureSnapshotGitIdentity(repoRoot: string): void {
   runGit(repoRoot, ["config", "user.email", "harness@openclaw.local"]);
 }
 
+const EXECUTION_WORKSPACE_ROOT = join(homedir(), ".openclaw", "harness-execution-workspaces");
+
+type IsolationState = {
+  planId: string;
+  repoRoot: string;
+  executionWorkdir: string;
+  cleanupRoot: string;
+  createdAt: string;
+};
+
+function isolationStatePath(planId: string): string {
+  return join(EXECUTION_WORKSPACE_ROOT, "state", `${planId}.json`);
+}
+
 function writeIsolationState(repoRoot: string, planId: string, executionWorkdir: string, cleanupRoot: string): string {
-  const statePath = join(cleanupRoot, "execution-workspaces", `${planId}.json`);
+  const statePath = isolationStatePath(planId);
   mkdirSync(dirname(statePath), { recursive: true });
   writeFileSync(
     statePath,
@@ -116,11 +130,24 @@ function writeIsolationState(repoRoot: string, planId: string, executionWorkdir:
       planId,
       repoRoot,
       executionWorkdir,
+      cleanupRoot,
       createdAt: new Date().toISOString(),
     }, null, 2) + "\n",
     "utf8",
   );
   return statePath;
+}
+
+function readIsolationState(planId: string): IsolationState | null {
+  const statePath = isolationStatePath(planId);
+  try {
+    if (!existsSync(statePath)) return null;
+    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as IsolationState;
+    if (!parsed?.executionWorkdir || !parsed?.repoRoot) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 export function prepareExecutionWorkspace(originalWorkdir: string, planId: string): PreparedExecutionWorkspace {
@@ -134,7 +161,23 @@ export function prepareExecutionWorkspace(originalWorkdir: string, planId: strin
     };
   }
 
-  const tempRoot = mkdtempSync(join(tmpdir(), "openclaw-harness-exec-"));
+  const existingState = readIsolationState(planId);
+  if (
+    existingState
+    && resolve(existingState.repoRoot) === repoRoot
+    && existsSync(existingState.executionWorkdir)
+  ) {
+    return {
+      originalWorkdir: resolvedWorkdir,
+      executionWorkdir: existingState.executionWorkdir,
+      isolated: true,
+      statePath: isolationStatePath(planId),
+      cleanupPath: existingState.cleanupRoot,
+    };
+  }
+
+  mkdirSync(EXECUTION_WORKSPACE_ROOT, { recursive: true });
+  const tempRoot = mkdtempSync(join(EXECUTION_WORKSPACE_ROOT, `${planId}-`));
   const tempDir = join(tempRoot, basename(repoRoot));
   const repoHasHead = hasHeadCommit(repoRoot);
 

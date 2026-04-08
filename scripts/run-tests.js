@@ -625,20 +625,50 @@ function testRealtimeCheckpointReviewModes() {
   const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
 
   try {
-    assert.equal(
-      harnessExecute.__realtimeCheckpointReviewModeForTests("plan_waiting", "round-complete"),
-      "embedded-plan",
-    );
-    assert.equal(
-      harnessExecute.__realtimeCheckpointReviewModeForTests("waiting", "round-complete"),
-      null,
-    );
-    assert.equal(
-      harnessExecute.__realtimeCheckpointReviewModeForTests("waiting", "terminal"),
-      null,
-    );
+    const stateDir = mkdtempSync(join(tmpdir(), "openclaw-harness-review-mode-"));
+    try {
+      assert.equal(
+        harnessExecute.__realtimeCheckpointReviewModeForTests("plan_waiting", stateDir, "round-complete"),
+        "embedded-plan",
+      );
+      writeFileSync(join(stateDir, "implementation-review-round-1.source.txt"), "verdict=REVISE\n", "utf8");
+      assert.equal(
+        harnessExecute.__realtimeCheckpointReviewModeForTests("plan_waiting", stateDir, "round-complete"),
+        null,
+      );
+      assert.equal(
+        harnessExecute.__realtimeCheckpointReviewModeForTests("waiting", stateDir, "round-complete"),
+        null,
+      );
+      assert.equal(
+        harnessExecute.__realtimeCheckpointReviewModeForTests("waiting", stateDir, "terminal"),
+        null,
+      );
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   } finally {
     cleanup();
+  }
+}
+
+function testRealtimeReviewDiagnostics() {
+  const stateDir = mkdtempSync(join(tmpdir(), "openclaw-harness-review-diag-"));
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+
+  try {
+    writeFileSync(join(stateDir, "implementation-review-round-1.source.txt"), "verdict=REVISE\n", "utf8");
+    writeFileSync(join(stateDir, "implementation-review-round-2.source.txt"), "verdict=DONE\n", "utf8");
+    writeFileSync(join(stateDir, "plan-review-round-2.error.txt"), "Context overflow\n", "utf8");
+
+    const diagnostics = harnessExecute.__collectRealtimeReviewDiagnosticsForTests(stateDir);
+    assert.equal(diagnostics.implementationRounds, 2);
+    assert.deepEqual(diagnostics.implementationVerdicts, ["r1=REVISE", "r2=DONE"]);
+    assert.equal(diagnostics.planReviewRounds, 0);
+    assert.equal(diagnostics.lastPlanReviewError.trim(), "Context overflow");
+  } finally {
+    cleanup();
+    rmSync(stateDir, { recursive: true, force: true });
   }
 }
 
@@ -1419,6 +1449,7 @@ const tests = [
   ["realtime harness promotes later success after plan_violation", testHarnessPromotesLaterSuccessAfterPlanViolation],
   ["realtime harness reads success from stream when result file is missing", testHarnessReadsSuccessFromStreamWhenResultFileIsMissing],
   ["realtime checkpoint review modes route plan to embedded and waiting to codex", testRealtimeCheckpointReviewModes],
+  ["realtime review diagnostics count implementation rounds and last plan-review error", testRealtimeReviewDiagnostics],
   ["realtime harness requires CLAUDE.md project context", testHarnessRequiresProjectContextBeforeRealtimeLaunch],
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],

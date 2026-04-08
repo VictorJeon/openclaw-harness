@@ -606,6 +606,9 @@ async function executeTask(
   const totalPhases = maxLoops === 0 ? 1 : 1 + 2 * maxLoops;
   const perPhaseBudget = remainingBudget / totalPhases;
   let workerSessionId = "";
+  const totalReviewLoops = (outerLoops: number): number => (
+    outerLoops + (isRealtimeBackend ? getRealtimeImplementationReviewLoops(workerSessionId) : 0)
+  );
 
   try {
     resetCheckpointTaskForRetry(checkpoint, task.id);
@@ -761,7 +764,7 @@ async function executeTask(
             workerSessionId,
             workerResult: currentWorkerResult,
             reviewPassed: false,
-            reviewLoops: reviewLoop.history.length,
+            reviewLoops: totalReviewLoops(reviewLoop.history.length),
             escalated: true,
             error: "Reviewer output could not be parsed after 3 attempts",
           };
@@ -801,7 +804,7 @@ async function executeTask(
               workerSessionId,
               workerResult: currentWorkerResult,
               reviewPassed: false,
-              reviewLoops: reviewLoop.history.length,
+              reviewLoops: totalReviewLoops(reviewLoop.history.length),
               escalated: true,
               error: isRealtimeBackend
                 ? formatRealtimeFailureForCaller(ctx, workdir, finalizeError)
@@ -821,7 +824,7 @@ async function executeTask(
           workerSessionId,
           workerResult: currentWorkerResult,
           reviewPassed: true,
-          reviewLoops: reviewLoop.history.length,
+          reviewLoops: totalReviewLoops(reviewLoop.history.length),
           escalated: false,
         };
       }
@@ -837,7 +840,7 @@ async function executeTask(
           workerSessionId,
           workerResult: currentWorkerResult,
           reviewPassed: false,
-          reviewLoops: reviewLoop.history.length,
+          reviewLoops: totalReviewLoops(reviewLoop.history.length),
           escalated: true,
           escalationReason: formatEscalation(plan, reviewLoop, task),
         };
@@ -866,7 +869,7 @@ async function executeTask(
               workerSessionId,
               workerResult: followUpResult.workerResult ?? currentWorkerResult,
               reviewPassed: false,
-              reviewLoops: reviewLoop.history.length,
+              reviewLoops: totalReviewLoops(reviewLoop.history.length),
               escalated: true,
               escalationReason: formatEscalation(plan, reviewLoop, task),
               error: isRealtimeBackend
@@ -914,7 +917,7 @@ async function executeTask(
       workerSessionId,
       workerResult: currentWorkerResult,
       reviewPassed: false,
-      reviewLoops: reviewLoop.history.length,
+      reviewLoops: totalReviewLoops(reviewLoop.history.length),
       escalated: true,
       error: "Review loop exited unexpectedly",
     };
@@ -1164,9 +1167,14 @@ function sanitizeCodexPromptOutput(stdout: string): string {
 
 function realtimeCheckpointReviewModeForStatus(
   status: string | null | undefined,
+  stateDir: string,
   _goal: "round-complete" | "terminal",
 ): RealtimeCheckpointReviewMode | null {
   if (status === "plan_waiting") {
+    const currentRound = detectLatestRealtimeRound(stateDir);
+    if (hasImplementationReviewArtifactForRound(stateDir, currentRound)) {
+      return null;
+    }
     return "embedded-plan";
   }
   return null;
@@ -1180,9 +1188,10 @@ function reviewArtifactPrefix(kind: EmbeddedRealtimeReviewKind | "implementation
 
 export function __realtimeCheckpointReviewModeForTests(
   status: string | null | undefined,
+  stateDir = REALTIME_STATE_ROOT,
   goal: "round-complete" | "terminal" = "round-complete",
 ): RealtimeCheckpointReviewMode | null {
-  return realtimeCheckpointReviewModeForStatus(status, goal);
+  return realtimeCheckpointReviewModeForStatus(status, stateDir, goal);
 }
 
 async function waitForRealtimeTerminalState(
@@ -1204,7 +1213,7 @@ async function waitForRealtimeTerminalState(
       lastStatus = currentStatus;
     }
 
-    const reviewMode = realtimeCheckpointReviewModeForStatus(lastStatus, goal);
+    const reviewMode = realtimeCheckpointReviewModeForStatus(lastStatus, stateDir, goal);
     if (reviewMode) {
       const currentRound = detectLatestRealtimeRound(stateDir);
       const reviewKey = `${reviewMode}:${currentRound}`;
@@ -1650,6 +1659,74 @@ type LatestRealtimeResult = {
   permissionDenials?: string[];
 };
 
+type RealtimeReviewDiagnostics = {
+  implementationRounds: number;
+  implementationVerdicts: string[];
+  planReviewRounds: number;
+  lastPlanReviewError?: string;
+};
+
+function extractArtifactRound(filename: string): number {
+  const match = filename.match(/-(\d+)\.[^.]+(?:\.[^.]+)?$/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+function listRealtimeArtifacts(stateDir: string, pattern: RegExp): Array<{ round: number; path: string }> {
+  try {
+    if (!existsSync(stateDir)) return [];
+    return readdirSync(stateDir)
+      .filter((name) => pattern.test(name))
+      .map((name) => ({ round: extractArtifactRound(name), path: join(stateDir, name) }))
+      .sort((a, b) => a.round - b.round);
+  } catch {
+    return [];
+  }
+}
+
+function parseReviewVerdictFromSource(path: string): string | null {
+  const text = readTextFileIfExists(path);
+  if (!text) return null;
+  const match = text.match(/^verdict=(.+)$/m);
+  return match?.[1]?.trim() || null;
+}
+
+function hasImplementationReviewArtifactForRound(stateDir: string, round: number): boolean {
+  if (round <= 0) return false;
+  return existsSync(join(stateDir, `implementation-review-round-${round}.source.txt`));
+}
+
+function collectRealtimeReviewDiagnostics(stateDir: string): RealtimeReviewDiagnostics {
+  const implementationSources = listRealtimeArtifacts(stateDir, /^implementation-review-round-\d+\.source\.txt$/);
+  const implementationVerdicts = implementationSources
+    .map(({ round, path }) => {
+      const verdict = parseReviewVerdictFromSource(path);
+      return verdict ? `r${round}=${verdict}` : null;
+    })
+    .filter((value): value is string => Boolean(value));
+
+  const planSources = listRealtimeArtifacts(stateDir, /^plan-review-round-\d+\.source\.txt$/);
+  const planErrors = listRealtimeArtifacts(stateDir, /^plan-review-round-\d+\.error\.txt$/);
+  const lastPlanReviewError = planErrors.length > 0
+    ? readTextFileIfExists(planErrors[planErrors.length - 1].path) ?? undefined
+    : undefined;
+
+  return {
+    implementationRounds: implementationSources.length,
+    implementationVerdicts,
+    planReviewRounds: planSources.length,
+    lastPlanReviewError,
+  };
+}
+
+function getRealtimeImplementationReviewLoops(jobId: string): number {
+  if (!jobId) return 0;
+  return collectRealtimeReviewDiagnostics(join(REALTIME_STATE_ROOT, jobId)).implementationRounds;
+}
+
+export function __collectRealtimeReviewDiagnosticsForTests(stateDir: string): RealtimeReviewDiagnostics {
+  return collectRealtimeReviewDiagnostics(stateDir);
+}
+
 function isLikelyRealtimePlanSummary(result: LatestRealtimeResult | null): boolean {
   const text = result?.resultText?.trim() ?? "";
   if (!text) return false;
@@ -1708,6 +1785,7 @@ function buildRealtimeSummary(
   extraDetail?: string,
 ): { summary: string; sessionId?: string } {
   const latestResult = readLatestRealtimeResult(stateDir);
+  const reviewDiagnostics = collectRealtimeReviewDiagnostics(stateDir);
   const verifyReport = readTextFileIfExists(join(stateDir, "verify-report.txt"));
   const outputLog = readTextFileIfExists(join(stateDir, "output.log"));
 
@@ -1719,9 +1797,26 @@ function buildRealtimeSummary(
       latestResult.costUsd != null ? `cost=$${latestResult.costUsd.toFixed(2)}` : "",
     ].filter(Boolean).join(", ");
     sections.push([
-      `Latest Claude result${metadata ? ` (${metadata})` : ""}:`,
+      `Latest worker result (Claude Code)${metadata ? ` (${metadata})` : ""}:`,
       tailText(latestResult.resultText, 16, 1600),
     ].join("\n"));
+  }
+
+  if (reviewDiagnostics.implementationRounds > 0) {
+    sections.push(
+      `Implementation reviews: ${reviewDiagnostics.implementationRounds}`
+      + (reviewDiagnostics.implementationVerdicts.length > 0
+        ? ` (${reviewDiagnostics.implementationVerdicts.join(", ")})`
+        : ""),
+    );
+  }
+
+  if (reviewDiagnostics.planReviewRounds > 0) {
+    sections.push(`Embedded plan reviews: ${reviewDiagnostics.planReviewRounds}`);
+  }
+
+  if (reviewDiagnostics.lastPlanReviewError) {
+    sections.push(`Last embedded plan-review error:\n${tailText(reviewDiagnostics.lastPlanReviewError, 8, 1200)}`);
   }
 
   if (verifyReport) {
