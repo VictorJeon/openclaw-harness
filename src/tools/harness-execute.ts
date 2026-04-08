@@ -1376,6 +1376,7 @@ async function runEmbeddedRealtimePlanReview(params: {
         agentId,
         latestResultText: latestResult?.resultText ?? "",
         retryReason,
+        compact: attempt >= 2,
       });
 
       const resolvedTimeoutMs = runtime.agent.resolveAgentTimeoutMs
@@ -1463,13 +1464,20 @@ function buildEmbeddedPlanReviewPrompt(params: {
   latestResultText: string;
   kind: EmbeddedRealtimeReviewKind;
   retryReason?: string;
+  compact?: boolean;
 }): string {
+  const compact = params.compact === true;
   const latestResult = params.latestResultText.trim()
-    ? tailText(params.latestResultText, 80, 7000)
+    ? tailText(params.latestResultText, compact ? 18 : 40, compact ? 1400 : 3200)
     : "(latest Claude result unavailable)";
   const acceptanceCriteria = params.task.acceptanceCriteria.length > 0
-    ? params.task.acceptanceCriteria.map((item) => `- ${item}`).join("\n")
+    ? params.task.acceptanceCriteria
+      .slice(0, compact ? 6 : 10)
+      .map((item) => `- ${tailText(item, 2, compact ? 180 : 280)}`)
+      .join("\n")
     : "- Complete the requested change without expanding scope.";
+  const originalRequest = tailText(params.plan.originalRequest, compact ? 10 : 20, compact ? 900 : 1800);
+  const taskScope = tailText(params.task.scope, compact ? 6 : 12, compact ? 500 : 900);
 
   const isPlanReview = params.kind === "plan";
 
@@ -1477,6 +1485,7 @@ function buildEmbeddedPlanReviewPrompt(params: {
     `You are the OpenClaw agent \`${params.agentId}\` reviewing a Claude Code ${isPlanReview ? "planning" : "implementation"} checkpoint for the coding harness.`,
     `The harness was invoked by this same agent, so the verdict and feedback must come from you directly.`,
     params.retryReason ? `Retry requirement: ${params.retryReason}` : "",
+    compact ? "Compact mode: focus only on the current task, not the whole conversation." : "",
     "",
     "Return format (strict):",
     "- First line must be exactly one of: VERDICT: PROCEED | VERDICT: REVISE | VERDICT: DONE | VERDICT: ABORT",
@@ -1498,9 +1507,9 @@ function buildEmbeddedPlanReviewPrompt(params: {
     `- round: ${params.round}`,
     `- checkpoint kind: ${params.kind}`,
     `- repo/workdir: ${params.workdir}`,
-    `- original request: ${params.plan.originalRequest}`,
+    `- original request: ${originalRequest}`,
     `- task title: ${params.task.title}`,
-    `- task scope: ${params.task.scope}`,
+    `- task scope: ${taskScope}`,
     "",
     "Acceptance criteria:",
     acceptanceCriteria,
@@ -1538,7 +1547,7 @@ function parseEmbeddedPlanReviewResponse(rawText: string): { verdict: PlanReview
 }
 
 function isTransientEmbeddedReviewError(message: string): boolean {
-  return /(temporarily overloaded|overloaded|rate limit|try again in a moment|timeout|timed out|temporarily unavailable)/i.test(message);
+  return /(temporarily overloaded|overloaded|rate limit|try again in a moment|timeout|timed out|temporarily unavailable|context overflow|prompt too large)/i.test(message);
 }
 
 function collectEmbeddedPayloadText(
