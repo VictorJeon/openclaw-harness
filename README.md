@@ -39,17 +39,39 @@ Recent implementation commits:
 | **0** | tiny/local-safe edits | caller agent direct | none |
 | **1** | normal coding tasks | default: `claude-realtime.sh` on Hetzner; opt-in: local Claude Code CLI via `workerBackend="local-cc"` | Codex CLI |
 | **2** | complex / high-risk / multi-step coding | same backend split as Tier 1 | caller-agent plan review + Codex CLI |
+| **review-only** | `reviewOnly=true` | none (synthesized from git diff) | Codex CLI |
 
 ### Tier 1
 - default worker runs through `claude-realtime.sh`
+- realtime worker requires project context: target repo must contain `CLAUDE.md` or `.claude/CLAUDE.md`; missing context now fails fast before launch
 - `workerBackend="local-cc"` runs one-shot local Claude Code CLI rounds in the local workdir and persists state under `/tmp/openclaw-harness-local-cc/<jobId>`
 - review loop can request fixes
 - remote-realtime follow-up fixes continue in the **same Claude session** via realtime `jobId` + `session_id`
 - local-cc follow-up fixes rerun a fresh local Claude CLI round with persisted `jobId` state reuse
 
+### Review-only mode
+
+Pass `reviewOnly: true` to skip planner/worker and review existing local changes:
+
+```txt
+harness_execute(
+  request: "Review my auth refactor for gaps",
+  workdir: "/path/to/repo",
+  reviewOnly: true
+)
+```
+
+- Collects changed files from `git diff` (staged + unstaged + untracked)
+- Synthesizes a `WorkerResult` from local changes
+- Runs the existing Codex CLI reviewer path
+- Returns structured review result with gaps (if any)
+- Does **not** enter the worker fix loop — reviewer is read-only
+- Fails clearly if there are no local changes to review
+
 ### Tier 2
 - worker uses the configured tier-1 backend (`remote-realtime` by default, `local-cc` when opted in)
-- plan review is produced by the **calling agent directly** (embedded runtime path)
+- the calling agent resolves `plan_waiting` checkpoints in-band
+- implementation `waiting` checkpoints are reviewed by Codex via the durable realtime owner, so Claude Code ↔ Codex ping-pong remains intact even if the original harness turn dies
 - remote-realtime syncs the repo back before Codex CLI review
 - local-cc works directly in the local workdir, so no remote sync step is involved
 
@@ -73,7 +95,10 @@ harness_execute(
 Useful parameters:
 - `request`
 - `workdir`
-- `mode` = `ask` | `delegate` | `autonomous`
+- `reviewOnly` — skip planner/worker, review local changes only
+
+Realtime worker note:
+- `harness_execute` with the default realtime worker requires project context in the target repo (`CLAUDE.md` or `.claude/CLAUDE.md`). Missing context fails before launch instead of getting stuck in `launching`.
 - `tier_override` = `0` | `1` | `2`
 - `max_budget_usd`
 - `approved_plan_id`
@@ -82,9 +107,10 @@ Typical flow:
 1. deterministic router classifies complexity
 2. model-backed planner builds the task list (Opus primary, Sonnet fallback)
 3. selected worker backend executes for tier 1+ (`remote-realtime` by default, optional `local-cc` locally)
-4. Codex CLI reviewer checks gaps
-5. fix loop runs if needed
-6. structured result returned
+4. for realtime lanes, the calling agent resolves `plan_waiting`, while implementation `waiting` is handed to the durable realtime owner for Codex review so worker rounds do not hang waiting for an external DONE signal
+5. Codex CLI reviewer checks final gaps
+6. fix loop runs if needed
+7. structured result returned
 
 ---
 

@@ -21,7 +21,7 @@ import { buildReviewPrompt, parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "./
  *      - Gaps → send fix instructions to Worker via sessions_send
  *   3. Worker fixes → updated result
  *   4. Reviewer re-reviews (same Codex session, remembers previous gaps)
- *   ... up to maxReviewLoops (default 4)
+ *   ... up to maxReviewLoops (default 10)
  *
  * Key: same model builds and reviews = shared blind spots.
  *      Different models cross-check each other.

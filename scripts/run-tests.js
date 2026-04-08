@@ -513,14 +513,14 @@ function testHarnessDefersTransientPlanViolationDuringRoundComplete() {
   }
 }
 
-function testHarnessSkipsClaudeMdCheckWhenProjectContextMissing() {
+function testHarnessRequiresProjectContextBeforeRealtimeLaunch() {
   const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
   const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-claude-md-missing-"));
 
   try {
-    assert.equal(harnessExecute.__shouldSkipClaudeMdCheckForTests(workdir), true);
+    assert.equal(harnessExecute.__hasRealtimeProjectContextForTests(workdir), false);
     writeFileSync(join(workdir, "CLAUDE.md"), "# context\n", "utf8");
-    assert.equal(harnessExecute.__shouldSkipClaudeMdCheckForTests(workdir), false);
+    assert.equal(harnessExecute.__hasRealtimeProjectContextForTests(workdir), true);
   } finally {
     rmSync(workdir, { recursive: true, force: true });
     cleanup();
@@ -600,6 +600,27 @@ function testHarnessReadsSuccessFromStreamWhenResultFileIsMissing() {
     );
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+function testRealtimeCheckpointReviewModes() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+
+  try {
+    assert.equal(
+      harnessExecute.__realtimeCheckpointReviewModeForTests("plan_waiting", "round-complete"),
+      "embedded-plan",
+    );
+    assert.equal(
+      harnessExecute.__realtimeCheckpointReviewModeForTests("waiting", "round-complete"),
+      null,
+    );
+    assert.equal(
+      harnessExecute.__realtimeCheckpointReviewModeForTests("waiting", "terminal"),
+      null,
+    );
+  } finally {
     cleanup();
   }
 }
@@ -1218,6 +1239,147 @@ async function testLocalCcTaskMismatchStillThrows() {
   }
 }
 
+// --- Review-only lane tests ---
+
+async function withCleanGitEnv(fn) {
+  const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  delete process.env.GIT_DIR;
+  delete process.env.GIT_WORK_TREE;
+  try {
+    return await fn();
+  } finally {
+    if (saved.GIT_DIR !== undefined) process.env.GIT_DIR = saved.GIT_DIR;
+    if (saved.GIT_WORK_TREE !== undefined) process.env.GIT_WORK_TREE = saved.GIT_WORK_TREE;
+  }
+}
+
+async function testCollectLocalChangesFindsModifiedFiles() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-review-only-"));
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "GIT_DIR" && k !== "GIT_WORK_TREE"));
+  const git = (...args) => execFileSync("git", args, { cwd: workdir, env: cleanEnv });
+
+  try {
+    git("init");
+    writeFileSync(join(workdir, "file1.ts"), "export const a = 1;\n", "utf8");
+    writeFileSync(join(workdir, "file2.ts"), "export const b = 2;\n", "utf8");
+    git("add", ".");
+    git("-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "init");
+    writeFileSync(join(workdir, "file1.ts"), "export const a = 42;\n", "utf8");
+    writeFileSync(join(workdir, "newfile.ts"), "export const c = 3;\n", "utf8");
+
+    const result = await withCleanGitEnv(() => harnessExecute.collectLocalChanges(workdir));
+    assert.ok(result.changedFiles.includes("file1.ts"), "should include modified file");
+    assert.ok(result.changedFiles.includes("newfile.ts"), "should include untracked file");
+    assert.ok(!result.changedFiles.includes("file2.ts"), "should not include unchanged file");
+    assert.ok(result.changedFiles.length >= 2, "should have at least 2 changed files");
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+async function testCollectLocalChangesReturnsEmptyForCleanRepo() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+  const workdir = mkdtempSync(join(tmpdir(), "openclaw-harness-review-only-clean-"));
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "GIT_DIR" && k !== "GIT_WORK_TREE"));
+  const git = (...args) => execFileSync("git", args, { cwd: workdir, env: cleanEnv });
+
+  try {
+    git("init");
+    writeFileSync(join(workdir, "readme.txt"), "clean\n", "utf8");
+    git("add", ".");
+    git("-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "init");
+
+    const result = await withCleanGitEnv(() => harnessExecute.collectLocalChanges(workdir));
+    assert.equal(result.changedFiles.length, 0, "clean repo should have no changed files");
+    assert.equal(result.diffStat, "", "clean repo should have empty diff stat");
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+    cleanup();
+  }
+}
+
+function testFormatReviewOnlyResultPass() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+
+  try {
+    const plan = {
+      id: "review-20260408-abc123",
+      originalRequest: "Review my changes",
+      tasks: [{ id: "review-1", title: "Review my changes", scope: "/tmp/test", acceptanceCriteria: ["Review my changes"], agent: "codex" }],
+      mode: "solo",
+      estimatedComplexity: "low",
+      tier: 0,
+    };
+    const workerResult = {
+      taskId: "review-1",
+      status: "completed",
+      summary: "2 files changed",
+      filesChanged: ["src/a.ts", "src/b.ts"],
+      testsRun: 0,
+      warnings: [],
+    };
+    const reviewResult = {
+      taskId: "review-1",
+      result: "pass",
+      gaps: [],
+      rerunNeeded: false,
+    };
+    const reviewLoop = { taskId: "review-1", currentLoop: 0, maxLoops: 4, gaps: [], passed: true, escalated: false, history: [reviewResult] };
+
+    const output = harnessExecute.__formatReviewOnlyResultForTests(plan, workerResult, reviewResult, reviewLoop, "pass");
+    assert.ok(output.includes("Review Only"), "should contain review-only header");
+    assert.ok(output.includes("Pass"), "should indicate pass");
+    assert.ok(output.includes("src/a.ts"), "should list changed files");
+    assert.ok(output.includes("src/b.ts"), "should list changed files");
+    assert.ok(output.includes("No gaps detected"), "should indicate no gaps");
+  } finally {
+    cleanup();
+  }
+}
+
+function testFormatReviewOnlyResultWithGaps() {
+  const { mod: harnessExecute, cleanup } = loadTsModule("src/tools/harness-execute.ts");
+
+  try {
+    const plan = {
+      id: "review-20260408-xyz789",
+      originalRequest: "Review my changes",
+      tasks: [{ id: "review-1", title: "Review my changes", scope: "/tmp/test", acceptanceCriteria: ["Review my changes"], agent: "codex" }],
+      mode: "solo",
+      estimatedComplexity: "low",
+      tier: 0,
+    };
+    const workerResult = {
+      taskId: "review-1",
+      status: "completed",
+      summary: "1 file changed",
+      filesChanged: ["src/c.ts"],
+      testsRun: 0,
+      warnings: [],
+    };
+    const reviewResult = {
+      taskId: "review-1",
+      result: "fail",
+      gaps: [
+        { type: "missing_core", evidence: "Unit tests not added", fixHint: "Add tests for the new function" },
+      ],
+      rerunNeeded: true,
+    };
+    const reviewLoop = { taskId: "review-1", currentLoop: 0, maxLoops: 4, gaps: reviewResult.gaps, passed: false, escalated: false, history: [reviewResult] };
+
+    const output = harnessExecute.__formatReviewOnlyResultForTests(plan, workerResult, reviewResult, reviewLoop, "fix");
+    assert.ok(output.includes("Gaps Found"), "should indicate gaps found");
+    assert.ok(output.includes("missing_core"), "should include gap type");
+    assert.ok(output.includes("Unit tests not added"), "should include gap evidence");
+    assert.ok(output.includes("Add tests for the new function"), "should include fix hint");
+    assert.ok(output.includes("src/c.ts"), "should list changed files");
+  } finally {
+    cleanup();
+  }
+}
+
 const tests = [
   ["planner ignores return bullets", testPlannerIgnoresReturnBullets],
   ["planner groups standalone file bullets", testPlannerGroupsStandaloneFileBullets],
@@ -1238,7 +1400,8 @@ const tests = [
   ["realtime harness defers transient plan_violation during round-complete", testHarnessDefersTransientPlanViolationDuringRoundComplete],
   ["realtime harness promotes later success after plan_violation", testHarnessPromotesLaterSuccessAfterPlanViolation],
   ["realtime harness reads success from stream when result file is missing", testHarnessReadsSuccessFromStreamWhenResultFileIsMissing],
-  ["realtime harness skips CLAUDE.md check when project context file is absent", testHarnessSkipsClaudeMdCheckWhenProjectContextMissing],
+  ["realtime checkpoint review modes route plan to embedded and waiting to codex", testRealtimeCheckpointReviewModes],
+  ["realtime harness requires CLAUDE.md project context", testHarnessRequiresProjectContextBeforeRealtimeLaunch],
   ["checkpoint marks run failed when a task fails early", testCheckpointMarksFailedWhenTaskFailsEarly],
   ["checkpoint finds recoverable run for matching request and workdir", testFindRecoverableCheckpointMatchesRequestAndWorkdir],
   ["checkpoint finds recoverable run through symlinked workdir alias", testFindRecoverableCheckpointMatchesSymlinkedWorkdir],
@@ -1252,6 +1415,10 @@ const tests = [
   ["local-cc workdir mismatch recovery migrates state", testLocalCcWorkdirMismatchRecovery],
   ["local-cc workdir mismatch recovery handles vanished old dir", testLocalCcWorkdirMismatchRecoveryVanishedOldDir],
   ["local-cc task mismatch still throws hard error", testLocalCcTaskMismatchStillThrows],
+  ["review-only collectLocalChanges finds modified and untracked files", testCollectLocalChangesFindsModifiedFiles],
+  ["review-only collectLocalChanges returns empty for clean repo", testCollectLocalChangesReturnsEmptyForCleanRepo],
+  ["review-only formatResult shows pass with no gaps", testFormatReviewOnlyResultPass],
+  ["review-only formatResult shows gaps found", testFormatReviewOnlyResultWithGaps],
 ];
 
 (async () => {
