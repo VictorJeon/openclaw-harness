@@ -1368,6 +1368,12 @@ async function runEmbeddedRealtimePlanReview(params: {
   for (let attempt = 1; attempt <= 4; attempt++) {
     const tempDir = mkdtempSync(join(tmpdir(), "harness-plan-review-"));
     const reviewerSessionId = `harness-plan-review-${params.jobId}-r${params.round}-a${attempt}-${Date.now()}`;
+    const reviewerSessionKey = buildHarnessSubagentSessionKey(
+      agentId,
+      params.jobId,
+      `${params.task.id}-${params.kind}-r${params.round}-a${attempt}`,
+      "reviewer",
+    );
     const sessionFile = join(tempDir, "session.jsonl");
 
     try {
@@ -1388,6 +1394,7 @@ async function runEmbeddedRealtimePlanReview(params: {
 
       const result = await runtime.agent.runEmbeddedPiAgent({
         sessionId: reviewerSessionId,
+        sessionKey: reviewerSessionKey,
         agentId,
         sessionFile,
         workspaceDir: reviewWorkspaceDir,

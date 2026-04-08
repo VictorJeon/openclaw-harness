@@ -6822,6 +6822,12 @@ async function runEmbeddedRealtimePlanReview(params) {
   for (let attempt = 1; attempt <= 4; attempt++) {
     const tempDir = (0, import_fs7.mkdtempSync)((0, import_path7.join)((0, import_os6.tmpdir)(), "harness-plan-review-"));
     const reviewerSessionId = `harness-plan-review-${params.jobId}-r${params.round}-a${attempt}-${Date.now()}`;
+    const reviewerSessionKey = buildHarnessSubagentSessionKey(
+      agentId,
+      params.jobId,
+      `${params.task.id}-${params.kind}-r${params.round}-a${attempt}`,
+      "reviewer"
+    );
     const sessionFile = (0, import_path7.join)(tempDir, "session.jsonl");
     try {
       const prompt = buildEmbeddedPlanReviewPrompt({
@@ -6835,6 +6841,7 @@ async function runEmbeddedRealtimePlanReview(params) {
       const timeoutMs = typeof resolvedTimeoutMs === "number" && resolvedTimeoutMs > 0 ? Math.min(resolvedTimeoutMs, 24e4) : 24e4;
       const result = await runtime.agent.runEmbeddedPiAgent({
         sessionId: reviewerSessionId,
+        sessionKey: reviewerSessionKey,
         agentId,
         sessionFile,
         workspaceDir: reviewWorkspaceDir,
@@ -7297,6 +7304,9 @@ function resolveEmbeddedReviewerProviderAndModel(reviewModel, fallbackModel) {
     provider: "openai-codex",
     model: "gpt-5.4"
   });
+}
+function buildHarnessSubagentSessionKey(agentId, planId, taskId, role) {
+  return role === "reviewer" ? `agent:${agentId}:subagent:harness-${planId}-${taskId}-review` : `agent:${agentId}:subagent:harness-${planId}-${taskId}`;
 }
 async function waitForSessionEnd(sessionId) {
   const activeSessionManager = requireHarnessSessionManager();
