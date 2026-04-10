@@ -111,6 +111,8 @@ export interface PluginConfig {
   workerModel?: string;      // legacy fallback alias for realtimeModel
   workerEffort?: ClaudeEffortLevel;
   reviewerReasoningEffort?: CodexReasoningEffortLevel;
+  consensusReviewerModel?: string;  // secondary reviewer model for consensus (e.g. "deepseek/deepseek-v3.2")
+  openRouterApiKey?: string;        // OpenRouter API key for secondary reviewer
   workerBackend: WorkerBackend;
   memoryV3Endpoint?: string;
   routerMaxTokens: number;
@@ -183,6 +185,7 @@ export interface ReviewResult {
   result: "pass" | "fail";
   gaps: ReviewGap[];
   rerunNeeded: boolean;
+  retryReviewer?: boolean;
 }
 
 export interface CheckpointData {

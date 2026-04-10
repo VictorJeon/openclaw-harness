@@ -252,8 +252,10 @@ function validatePlannerTask(raw: any, index: number): ParsedPlannerOutput["task
   const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `task-${index + 1}`;
   const title = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : null;
   if (!title) return null; // title is required
+  if (shouldIgnoreStandaloneTaskBullet(title)) return null;
 
   const scope = typeof raw.scope === "string" && raw.scope.trim() ? raw.scope.trim() : title;
+  const normalizedScope = scope.trim() || title;
   const agent = typeof raw.agent === "string" && raw.agent.trim() ? raw.agent.trim() : "codex";
 
   let acceptanceCriteria: string[] = [];
@@ -266,7 +268,7 @@ function validatePlannerTask(raw: any, index: number): ParsedPlannerOutput["task
     acceptanceCriteria = [title];
   }
 
-  return { id, title, scope, acceptance_criteria: acceptanceCriteria, agent };
+  return { id, title, scope: normalizedScope, acceptance_criteria: acceptanceCriteria, agent };
 }
 
 const VALID_MODES = new Set(["parallel", "sequential", "solo"]);
@@ -336,9 +338,11 @@ function yamlToHarnessPlan(
   parsed: ParsedPlannerOutput,
   request: string,
   metadata: PlannerMetadata,
+  tier: Tier = 2,
 ): HarnessPlan {
   const normalized = normalizePlannerTasks(parsed.tasks);
-  const tasks: TaskSpec[] = normalized.map((task, index) => ({
+  const pruned = pruneRedundantPlannerTasks(normalized, request);
+  const tasks: TaskSpec[] = pruned.map((task, index) => ({
     id: nextTaskId(index),
     title: task.title.length > 60 ? task.title.slice(0, 57) + "..." : task.title,
     scope: task.scope,
@@ -367,9 +371,42 @@ function yamlToHarnessPlan(
         : complexityNorm === "medium"
           ? "medium"
           : "high",
-    tier: 2,
+    tier,
     plannerMetadata: metadata,
   };
+}
+
+function pruneRedundantPlannerTasks(
+  tasks: ParsedPlannerOutput["tasks"],
+  request: string,
+): ParsedPlannerOutput["tasks"] {
+  if (tasks.length <= 1) return tasks;
+
+  const cleanupSignals = /(abort older active|stale harness runs|leftover pid|lock files?|clean state|terminate older)/i;
+  const outputContractSignals = /(return exactly|output only|artifact path|five lines|stdout|stderr|exit code|final realtime status|first blocking error)/i;
+  const requestSuggestsSingleFlow = cleanupSignals.test(request) && outputContractSignals.test(request);
+  if (!requestSuggestsSingleFlow) return tasks;
+
+  const verificationSignals = /(verify|validation|validate|smoke|report|return exactly|output only|artifact path|five lines|stdout|stderr|exit code|final realtime status|first blocking error)/i;
+  const implementationTasks = tasks.filter((task) => !verificationSignals.test(`${task.title}\n${task.scope}`));
+  const verificationTasks = tasks.filter((task) => verificationSignals.test(`${task.title}\n${task.scope}`));
+
+  if (implementationTasks.length !== 1 || verificationTasks.length === 0) {
+    return tasks;
+  }
+
+  const primary = {
+    ...implementationTasks[0],
+    acceptance_criteria: unique([
+      ...implementationTasks[0].acceptance_criteria,
+      ...verificationTasks.flatMap((task) => task.acceptance_criteria),
+    ]),
+  };
+  primary.scope = mergeScope(
+    primary.scope,
+    verificationTasks.map((task) => task.scope).join("\n"),
+  );
+  return [primary];
 }
 
 function normalizePlannerTasks(
@@ -490,6 +527,7 @@ export async function buildModelPlan(
   memoryContext: string = "",
   workdir: string = process.cwd(),
   runner: PlannerModelRunner = runPlannerWithSession,
+  tier: 1 | 2 = 2,
 ): Promise<HarnessPlan> {
   const prompt = buildPlannerPrompt(request, memoryContext);
   const plannerModels = uniquePlannerModels([
@@ -500,7 +538,7 @@ export async function buildModelPlan(
 
   for (const requestedModel of plannerModels) {
     try {
-      console.log(`[planner] Attempting model-backed planning with model=${requestedModel}`);
+      console.log(`[planner] Attempting model-backed planning with model=${requestedModel}, tier=${tier}`);
       const result = await runner({ prompt, requestedModel, workdir });
       const parsed = parsePlannerJson(result.output);
       if (!parsed) {
@@ -515,7 +553,7 @@ export async function buildModelPlan(
       };
 
       console.log(`[planner] Model-backed plan created: model=${metadata.model ?? requestedModel}, tasks=${parsed.tasks.length}, mode=${parsed.mode}`);
-      return yamlToHarnessPlan(parsed, request, metadata);
+      return yamlToHarnessPlan(parsed, request, metadata, tier);
     } catch (error: any) {
       const message = error?.message ?? String(error);
       failures.push(`${requestedModel}: ${message}`);
@@ -524,7 +562,7 @@ export async function buildModelPlan(
   }
 
   console.log(`[planner] All model attempts failed, falling back to heuristic planner`);
-  const heuristicPlan = buildPlan(request, 2, memoryContext);
+  const heuristicPlan = buildPlan(request, tier, memoryContext);
   heuristicPlan.plannerMetadata = {
     backend: "heuristic",
     fallback: true,

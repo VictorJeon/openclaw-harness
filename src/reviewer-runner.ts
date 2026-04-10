@@ -113,12 +113,18 @@ export function buildCodexReviewerCommand(options: {
   model?: string;
   prompt: string;
   reasoningEffort?: string;
+  resumeSessionId?: string;
 }): CodexReviewerCommand {
-  const args = [
-    "exec",
-    "-",
+  const isResume = !!options.resumeSessionId;
+
+  // First review: `codex exec - ...` (starts new session, persisted to disk)
+  // Re-review:    `codex exec resume <id> - ...` (continues same session)
+  const args = isResume
+    ? ["exec", "resume", options.resumeSessionId!, "-"]
+    : ["exec", "-"];
+
+  args.push(
     "--skip-git-repo-check",
-    "--ephemeral",
     "--sandbox",
     "read-only",
     "--color",
@@ -127,7 +133,7 @@ export function buildCodexReviewerCommand(options: {
     options.outputFile,
     "-C",
     options.workdir,
-  ];
+  );
 
   if (options.model) {
     args.push("-m", options.model);
@@ -138,10 +144,17 @@ export function buildCodexReviewerCommand(options: {
     args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
   }
 
+  // For resumed sessions, only send the new review prompt (system prompt
+  // is already in the conversation history). For fresh sessions, prepend
+  // the system prompt.
+  const prompt = isResume
+    ? options.prompt
+    : [REVIEWER_SYSTEM_PROMPT, "", options.prompt].join("\n");
+
   return {
     command: "codex",
     args,
-    prompt: [REVIEWER_SYSTEM_PROMPT, "", options.prompt].join("\n"),
+    prompt,
   };
 }
 
@@ -151,8 +164,9 @@ export async function runReviewerWithCodexCli(options: {
   model?: string;
   reasoningEffort?: string;
   timeoutMs?: number;
+  resumeSessionId?: string;
 }): Promise<CodexReviewerRunResult> {
-  const sessionId = `codex-review-${nanoid(8)}`;
+  const sessionId = options.resumeSessionId ?? `codex-review-${nanoid(8)}`;
   const tempDir = mkdtempSync(join(tmpdir(), "openclaw-harness-review-"));
   const outputFile = join(tempDir, "last-message.txt");
   const normalizedModel = normalizeCodexModel(options.model);
@@ -162,12 +176,13 @@ export async function runReviewerWithCodexCli(options: {
     model: normalizedModel,
     prompt: options.prompt,
     reasoningEffort: options.reasoningEffort,
+    resumeSessionId: options.resumeSessionId,
   });
 
   try {
-    const output = await runCommand(command, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options.workdir, outputFile);
+    const { output, codexSessionId } = await runCommand(command, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options.workdir, outputFile);
     return {
-      sessionId,
+      sessionId: codexSessionId ?? sessionId,
       output,
       model: normalizedModel,
     };
@@ -185,7 +200,7 @@ async function runCommand(
   timeoutMs: number,
   workdir: string,
   outputFile: string,
-): Promise<string> {
+): Promise<{ output: string; codexSessionId?: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command.command, command.args, {
       cwd: workdir,
@@ -210,7 +225,9 @@ async function runCommand(
         return;
       }
 
-      resolve(output ?? "");
+      // Extract codex session ID from stderr (format: "session id: <UUID>")
+      const sessionMatch = stderr.match(/session id:\s*([0-9a-f-]{36})/i);
+      resolve({ output: output ?? "", codexSessionId: sessionMatch?.[1] });
     };
 
     const timer = setTimeout(() => {
