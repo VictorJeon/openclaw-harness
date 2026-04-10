@@ -5789,9 +5789,8 @@ function normalizeCodexModel(model) {
 }
 function buildCodexReviewerCommand(options) {
   const isResume = !!options.resumeSessionId;
-  const args = isResume ? ["exec", "resume", options.resumeSessionId, "-"] : ["exec", "-"];
+  const args = isResume ? ["exec", "resume", "--skip-git-repo-check", options.resumeSessionId, "-"] : ["exec", "-", "--skip-git-repo-check"];
   args.push(
-    "--skip-git-repo-check",
     "--sandbox",
     "read-only",
     "--color",

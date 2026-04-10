@@ -117,14 +117,14 @@ export function buildCodexReviewerCommand(options: {
 }): CodexReviewerCommand {
   const isResume = !!options.resumeSessionId;
 
-  // First review: `codex exec - ...` (starts new session, persisted to disk)
-  // Re-review:    `codex exec resume <id> - ...` (continues same session)
+  // First review: `codex exec - --skip-git-repo-check ...`
+  // Re-review:    `codex exec resume --skip-git-repo-check <id> - ...`
+  // Note: --skip-git-repo-check must come BEFORE SESSION_ID in resume mode
   const args = isResume
-    ? ["exec", "resume", options.resumeSessionId!, "-"]
-    : ["exec", "-"];
+    ? ["exec", "resume", "--skip-git-repo-check", options.resumeSessionId!, "-"]
+    : ["exec", "-", "--skip-git-repo-check"];
 
   args.push(
-    "--skip-git-repo-check",
     "--sandbox",
     "read-only",
     "--color",
