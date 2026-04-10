@@ -8058,9 +8058,9 @@ async function sendHarnessNotification(channel, ctx, message) {
       args.push("--channel", parts[0]);
     }
     if (parts.length >= 3) {
-      args.push("--reply-account", parts[1], "--reply-to", parts[2]);
+      args.push("-t", parts[2]);
     } else if (parts.length === 2) {
-      args.push("--reply-to", parts[1]);
+      args.push("-t", parts[1]);
     }
     await execFileAsync("openclaw", args, { timeout: 15e3 });
   } catch (err) {
