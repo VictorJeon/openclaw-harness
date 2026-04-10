@@ -133,10 +133,18 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       const existingCheckpoint: CheckpointData | null = autoResumeCheckpoint;
 
       if (existingCheckpoint) {
-        // If checkpoint is still "running", an async background run is already in flight.
-        // Do NOT restart it — report the existing plan instead. This prevents double-execution
-        // when the caller retries the same request before the first run finishes.
-        if (existingCheckpoint.status === "running") {
+        // If checkpoint is still "running" AND has a live worker/reviewer,
+        // an async background run is genuinely in flight. Do NOT restart it.
+        // After reconcileStaleCheckpoint has recovered a crashed run, sessions
+        // will be empty and no tasks will be in-progress/in-review — in that
+        // case fall through to the resume path.
+        const hasActiveWork =
+          Object.keys(existingCheckpoint.sessions ?? {}).length > 0 &&
+          existingCheckpoint.tasks.some(
+            (t) => t.status === "in-progress" || t.status === "in-review",
+          );
+
+        if (existingCheckpoint.status === "running" && hasActiveWork) {
           console.log(`[harness] Existing run still active: ${existingCheckpoint.runId} — skipping duplicate execution`);
           return {
             content: [{

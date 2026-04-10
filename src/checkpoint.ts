@@ -193,33 +193,92 @@ function checkpointHasLiveSession(checkpoint: CheckpointData): boolean {
   });
 }
 
+const MAX_AUTO_RESUME_COUNT = 5;
+
 function reconcileStaleCheckpoint(checkpoint: CheckpointData, workdir: string): CheckpointData {
   if (checkpoint.status !== "running") return checkpoint;
   if (checkpointHasLiveSession(checkpoint)) return checkpoint;
 
-  const hasFailed = checkpoint.tasks.some((task) => task.status === "failed");
-  const hasCompleted = checkpoint.tasks.some((task) => task.status === "completed");
-  const hasReviewPending = checkpoint.tasks.some((task) => task.status === "in-review");
-  const hasWorkInProgress = checkpoint.tasks.some((task) => task.status === "in-progress");
+  // Worker/reviewer processes are dead (gateway restart, crash, stream hang, …).
+  // Reset in-progress / in-review tasks to pending so the next harness.execute
+  // with the same request can pick them up via findRecoverableCheckpoint.
+  // Completed tasks are left intact and will be skipped on resume.
+  const resumableIds = new Set(
+    checkpoint.tasks
+      .filter((task) => task.status === "in-progress" || task.status === "in-review")
+      .map((task) => task.id),
+  );
 
-  if (hasReviewPending || hasWorkInProgress) {
+  if (resumableIds.size > 0) {
+    const nextResumeCount = (checkpoint.resumeCount ?? 0) + 1;
+
+    if (nextResumeCount > MAX_AUTO_RESUME_COUNT) {
+      // Too many consecutive worker deaths on the same checkpoint — bail out
+      // to failed so we do not loop forever on a structurally broken task.
+      checkpoint.tasks = checkpoint.tasks.map((task) => {
+        if (resumableIds.has(task.id)) {
+          return { ...task, status: "failed", reviewPassed: false };
+        }
+        return task;
+      });
+      checkpoint.status = "failed";
+      checkpoint.resumeCount = nextResumeCount;
+      checkpoint.lastUpdated = new Date().toISOString();
+      saveCheckpoint(checkpoint, workdir);
+      return checkpoint;
+    }
+
     checkpoint.tasks = checkpoint.tasks.map((task) => {
-      if (task.status === "in-review" || task.status === "in-progress") {
-        return { ...task, status: "failed", reviewPassed: false };
-      }
-      return task;
+      if (!resumableIds.has(task.id)) return task;
+      // Strip prior attempt state so the task restarts cleanly.
+      return {
+        id: task.id,
+        status: "pending" as TaskStatus,
+      };
     });
+
+    // Drop dead session references for reset tasks so resume starts fresh.
+    if (checkpoint.sessions) {
+      const nextSessions: typeof checkpoint.sessions = {};
+      for (const [taskId, session] of Object.entries(checkpoint.sessions)) {
+        if (!resumableIds.has(taskId)) {
+          nextSessions[taskId] = session;
+        }
+      }
+      checkpoint.sessions = nextSessions;
+    }
+
+    checkpoint.resumeCount = nextResumeCount;
+    checkpoint.lastUpdated = new Date().toISOString();
+    saveCheckpoint(checkpoint, workdir);
+    console.log(
+      `[checkpoint] Auto-recovered stale checkpoint ${checkpoint.runId} ` +
+        `(reset ${resumableIds.size} task(s) to pending, resumeCount=${nextResumeCount})`,
+    );
+    return checkpoint;
   }
 
-  if (checkpoint.tasks.every((task) => task.status === "completed" && task.reviewPassed)) {
+  // No in-progress/in-review tasks. Decide state carefully:
+  //   - all completed + reviewPassed  → complete
+  //   - any task explicitly failed    → failed
+  //   - otherwise (all pending, or mix of pending + completed) → leave as
+  //     "running" so the next harness.execute can resume it. This case covers
+  //     both fresh checkpoints and ones that reconcile already repaired.
+  const allCompleted = checkpoint.tasks.every(
+    (task) => task.status === "completed" && task.reviewPassed,
+  );
+  const anyFailed = checkpoint.tasks.some((task) => task.status === "failed");
+
+  if (allCompleted) {
     checkpoint.status = "complete";
-  } else if (hasFailed || hasCompleted || hasReviewPending || hasWorkInProgress) {
+    checkpoint.lastUpdated = new Date().toISOString();
+    saveCheckpoint(checkpoint, workdir);
+  } else if (anyFailed) {
     checkpoint.status = "failed";
-  } else {
-    checkpoint.status = "failed";
+    checkpoint.lastUpdated = new Date().toISOString();
+    saveCheckpoint(checkpoint, workdir);
   }
-  checkpoint.lastUpdated = new Date().toISOString();
-  saveCheckpoint(checkpoint, workdir);
+  // else: leave checkpoint untouched — still resumable running.
   return checkpoint;
 }
 
@@ -246,7 +305,12 @@ export function findRecoverableCheckpoint(request: string, workdir: string): Che
       .filter((checkpoint) => checkpoint.status === "running")
       .filter((checkpoint) => checkpoint.plan?.originalRequest === request)
       .filter((checkpoint) => normalizeWorkdirPath(checkpoint.workdir ?? "") === normalizedWorkdir || normalizeWorkdirPath(checkpoint.executionWorkdir ?? "") === normalizedWorkdir)
-      .filter((checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0)
+      .filter(
+        (checkpoint) =>
+          checkpoint.tasks.some((task) => task.status !== "pending") ||
+          Object.keys(checkpoint.sessions ?? {}).length > 0 ||
+          (checkpoint.resumeCount ?? 0) > 0,
+      )
       .sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
 
     return matches[0] ?? null;
@@ -258,8 +322,9 @@ export function findRecoverableCheckpoint(request: string, workdir: string): Che
 
 // ── Stale plan cleanup ──
 
-const STALE_PLANNING_MS = 30 * 60 * 1000;   // 30 min for stuck "running"
-const STALE_COMPLETE_MS = 60 * 60 * 1000;   // 1 hour for terminal states
+const STALE_PLANNING_MS = 30 * 60 * 1000;          // 30 min for stuck "running" with no activity
+const STALE_CHECKPOINT_MS = 24 * 60 * 60 * 1000;   // 24 hours — keep checkpoints visible for dashboard
+const STALE_WORKSPACE_MS = 60 * 60 * 1000;          // 1 hour — clean up 20GB+ workspace clones early
 
 /**
  * Remove stale checkpoint directories.
@@ -283,11 +348,35 @@ export function cleanupStaleCheckpoints(): { removed: number; errors: number } {
       if (!existsSync(cpPath)) continue;
 
       try {
-        const cp = JSON.parse(readFileSync(cpPath, "utf-8")) as CheckpointData;
+        let cp = JSON.parse(readFileSync(cpPath, "utf-8")) as CheckpointData;
         const lastUpdated = Date.parse(cp.lastUpdated || "");
         if (isNaN(lastUpdated)) continue;
 
-        const age = now - lastUpdated;
+        // For stuck "running" plans where the worker/reviewer processes have
+        // died, run reconcile first. This either bumps the checkpoint into a
+        // terminal state (so normal cleanup applies) or auto-recovers it by
+        // resetting in-progress tasks to pending. The recovered checkpoint
+        // then survives cleanup until the next harness.execute resumes it.
+        if (cp.status === "running") {
+          const reconcileWorkdir = cp.workdir || cp.executionWorkdir || "";
+          const before = { status: cp.status, resumeCount: cp.resumeCount ?? 0 };
+          cp = reconcileStaleCheckpoint(cp, reconcileWorkdir);
+          if (
+            cp.status !== before.status ||
+            (cp.resumeCount ?? 0) !== before.resumeCount
+          ) {
+            console.log(
+              `[checkpoint] Cleanup reconciled ${cp.runId}: ` +
+                `status ${before.status}→${cp.status}, ` +
+                `resumeCount ${before.resumeCount}→${cp.resumeCount ?? 0}`,
+            );
+          }
+        }
+
+        const reconciledLastUpdated = Date.parse(cp.lastUpdated || "");
+        const age = Number.isNaN(reconciledLastUpdated)
+          ? now - lastUpdated
+          : now - reconciledLastUpdated;
         const isTerminal = cp.status === "complete" || cp.status === "failed"
           || cp.status === "escalated" || (cp.status as string) === "aborted";
 
@@ -303,14 +392,25 @@ export function cleanupStaleCheckpoints(): { removed: number; errors: number } {
           } catch { /* use JSON age */ }
         }
 
-        const shouldRemove = isTerminal
-          ? age > STALE_COMPLETE_MS
+        // Workspace clones (20GB+): clean aggressively for terminal plans.
+        // For "running" plans, only clean workspace if reconcile could not
+        // recover them (should not happen — reconcile either terminates or
+        // resets to pending + running). Guard with STALE_PLANNING_MS anyway.
+        const shouldCleanWorkspace = isTerminal
+          ? age > STALE_WORKSPACE_MS
           : cp.status === "running" && fileAge > STALE_PLANNING_MS;
 
-        if (shouldRemove) {
-          rmSync(dirPath, { recursive: true, force: true });
-          // Also clean up the associated execution workspace (can be 20GB+)
+        if (shouldCleanWorkspace) {
           cleanupWorkspaceForPlan(dirName);
+        }
+
+        // Checkpoints (small JSON): keep 24 hours for terminal plans.
+        // Running plans are preserved as long as reconcile keeps them alive;
+        // they only get removed once reconcile turns them terminal.
+        const shouldRemoveCheckpoint = isTerminal && age > STALE_CHECKPOINT_MS;
+
+        if (shouldRemoveCheckpoint) {
+          rmSync(dirPath, { recursive: true, force: true });
           removed++;
         }
       } catch {

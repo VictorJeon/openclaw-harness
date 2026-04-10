@@ -164,27 +164,61 @@ function checkpointHasLiveSession(checkpoint) {
 function reconcileStaleCheckpoint(checkpoint, workdir) {
   if (checkpoint.status !== "running") return checkpoint;
   if (checkpointHasLiveSession(checkpoint)) return checkpoint;
-  const hasFailed = checkpoint.tasks.some((task) => task.status === "failed");
-  const hasCompleted = checkpoint.tasks.some((task) => task.status === "completed");
-  const hasReviewPending = checkpoint.tasks.some((task) => task.status === "in-review");
-  const hasWorkInProgress = checkpoint.tasks.some((task) => task.status === "in-progress");
-  if (hasReviewPending || hasWorkInProgress) {
+  const resumableIds = new Set(
+    checkpoint.tasks.filter((task) => task.status === "in-progress" || task.status === "in-review").map((task) => task.id)
+  );
+  if (resumableIds.size > 0) {
+    const nextResumeCount = (checkpoint.resumeCount ?? 0) + 1;
+    if (nextResumeCount > MAX_AUTO_RESUME_COUNT) {
+      checkpoint.tasks = checkpoint.tasks.map((task) => {
+        if (resumableIds.has(task.id)) {
+          return { ...task, status: "failed", reviewPassed: false };
+        }
+        return task;
+      });
+      checkpoint.status = "failed";
+      checkpoint.resumeCount = nextResumeCount;
+      checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+      saveCheckpoint(checkpoint, workdir);
+      return checkpoint;
+    }
     checkpoint.tasks = checkpoint.tasks.map((task) => {
-      if (task.status === "in-review" || task.status === "in-progress") {
-        return { ...task, status: "failed", reviewPassed: false };
-      }
-      return task;
+      if (!resumableIds.has(task.id)) return task;
+      return {
+        id: task.id,
+        status: "pending"
+      };
     });
+    if (checkpoint.sessions) {
+      const nextSessions = {};
+      for (const [taskId, session] of Object.entries(checkpoint.sessions)) {
+        if (!resumableIds.has(taskId)) {
+          nextSessions[taskId] = session;
+        }
+      }
+      checkpoint.sessions = nextSessions;
+    }
+    checkpoint.resumeCount = nextResumeCount;
+    checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+    saveCheckpoint(checkpoint, workdir);
+    console.log(
+      `[checkpoint] Auto-recovered stale checkpoint ${checkpoint.runId} (reset ${resumableIds.size} task(s) to pending, resumeCount=${nextResumeCount})`
+    );
+    return checkpoint;
   }
-  if (checkpoint.tasks.every((task) => task.status === "completed" && task.reviewPassed)) {
+  const allCompleted = checkpoint.tasks.every(
+    (task) => task.status === "completed" && task.reviewPassed
+  );
+  const anyFailed = checkpoint.tasks.some((task) => task.status === "failed");
+  if (allCompleted) {
     checkpoint.status = "complete";
-  } else if (hasFailed || hasCompleted || hasReviewPending || hasWorkInProgress) {
+    checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+    saveCheckpoint(checkpoint, workdir);
+  } else if (anyFailed) {
     checkpoint.status = "failed";
-  } else {
-    checkpoint.status = "failed";
+    checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+    saveCheckpoint(checkpoint, workdir);
   }
-  checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-  saveCheckpoint(checkpoint, workdir);
   return checkpoint;
 }
 function findRecoverableCheckpoint(request, workdir) {
@@ -200,7 +234,9 @@ function findRecoverableCheckpoint(request, workdir) {
       } catch {
         return null;
       }
-    }).filter((checkpoint) => checkpoint !== null).filter((checkpoint) => checkpoint.status === "running").filter((checkpoint) => checkpoint.plan?.originalRequest === request).filter((checkpoint) => normalizeWorkdirPath(checkpoint.workdir ?? "") === normalizedWorkdir || normalizeWorkdirPath(checkpoint.executionWorkdir ?? "") === normalizedWorkdir).filter((checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0).sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
+    }).filter((checkpoint) => checkpoint !== null).filter((checkpoint) => checkpoint.status === "running").filter((checkpoint) => checkpoint.plan?.originalRequest === request).filter((checkpoint) => normalizeWorkdirPath(checkpoint.workdir ?? "") === normalizedWorkdir || normalizeWorkdirPath(checkpoint.executionWorkdir ?? "") === normalizedWorkdir).filter(
+      (checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0 || (checkpoint.resumeCount ?? 0) > 0
+    ).sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
     return matches[0] ?? null;
   } catch (err) {
     console.warn(`[checkpoint] Failed to search recoverable checkpoints: ${err?.message ?? String(err)}`);
@@ -219,10 +255,21 @@ function cleanupStaleCheckpoints() {
       const cpPath = (0, import_path3.join)(dirPath, "checkpoint.json");
       if (!(0, import_fs3.existsSync)(cpPath)) continue;
       try {
-        const cp = JSON.parse((0, import_fs3.readFileSync)(cpPath, "utf-8"));
+        let cp = JSON.parse((0, import_fs3.readFileSync)(cpPath, "utf-8"));
         const lastUpdated = Date.parse(cp.lastUpdated || "");
         if (isNaN(lastUpdated)) continue;
-        const age = now - lastUpdated;
+        if (cp.status === "running") {
+          const reconcileWorkdir = cp.workdir || cp.executionWorkdir || "";
+          const before = { status: cp.status, resumeCount: cp.resumeCount ?? 0 };
+          cp = reconcileStaleCheckpoint(cp, reconcileWorkdir);
+          if (cp.status !== before.status || (cp.resumeCount ?? 0) !== before.resumeCount) {
+            console.log(
+              `[checkpoint] Cleanup reconciled ${cp.runId}: status ${before.status}\u2192${cp.status}, resumeCount ${before.resumeCount}\u2192${cp.resumeCount ?? 0}`
+            );
+          }
+        }
+        const reconciledLastUpdated = Date.parse(cp.lastUpdated || "");
+        const age = Number.isNaN(reconciledLastUpdated) ? now - lastUpdated : now - reconciledLastUpdated;
         const isTerminal = cp.status === "complete" || cp.status === "failed" || cp.status === "escalated" || cp.status === "aborted";
         let fileAge = age;
         if (cp.status === "running") {
@@ -232,10 +279,13 @@ function cleanupStaleCheckpoints() {
           } catch {
           }
         }
-        const shouldRemove = isTerminal ? age > STALE_COMPLETE_MS : cp.status === "running" && fileAge > STALE_PLANNING_MS;
-        if (shouldRemove) {
-          (0, import_fs3.rmSync)(dirPath, { recursive: true, force: true });
+        const shouldCleanWorkspace = isTerminal ? age > STALE_WORKSPACE_MS : cp.status === "running" && fileAge > STALE_PLANNING_MS;
+        if (shouldCleanWorkspace) {
           cleanupWorkspaceForPlan(dirName);
+        }
+        const shouldRemoveCheckpoint = isTerminal && age > STALE_CHECKPOINT_MS;
+        if (shouldRemoveCheckpoint) {
+          (0, import_fs3.rmSync)(dirPath, { recursive: true, force: true });
           removed++;
         }
       } catch {
@@ -313,15 +363,17 @@ function cleanupOrphanedWorkspaces(now) {
   } catch {
   }
 }
-var import_fs3, import_process, import_os3, import_path3, STALE_PLANNING_MS, STALE_COMPLETE_MS, WORKSPACE_ROOT;
+var import_fs3, import_process, import_os3, import_path3, MAX_AUTO_RESUME_COUNT, STALE_PLANNING_MS, STALE_CHECKPOINT_MS, STALE_WORKSPACE_MS, WORKSPACE_ROOT;
 var init_checkpoint = __esm({
   "src/checkpoint.ts"() {
     import_fs3 = require("fs");
     import_process = require("process");
     import_os3 = require("os");
     import_path3 = require("path");
+    MAX_AUTO_RESUME_COUNT = 5;
     STALE_PLANNING_MS = 30 * 60 * 1e3;
-    STALE_COMPLETE_MS = 60 * 60 * 1e3;
+    STALE_CHECKPOINT_MS = 24 * 60 * 60 * 1e3;
+    STALE_WORKSPACE_MS = 60 * 60 * 1e3;
     WORKSPACE_ROOT = (0, import_path3.join)((0, import_os3.homedir)(), ".openclaw", "harness-execution-workspaces");
   }
 });
@@ -6390,7 +6442,10 @@ function makeHarnessExecuteTool(ctx) {
       }
       const existingCheckpoint = autoResumeCheckpoint;
       if (existingCheckpoint) {
-        if (existingCheckpoint.status === "running") {
+        const hasActiveWork = Object.keys(existingCheckpoint.sessions ?? {}).length > 0 && existingCheckpoint.tasks.some(
+          (t) => t.status === "in-progress" || t.status === "in-review"
+        );
+        if (existingCheckpoint.status === "running" && hasActiveWork) {
           console.log(`[harness] Existing run still active: ${existingCheckpoint.runId} \u2014 skipping duplicate execution`);
           return {
             content: [{

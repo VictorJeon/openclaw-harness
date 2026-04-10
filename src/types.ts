@@ -206,6 +206,13 @@ export interface CheckpointData {
   }>;
   sessions: Record<string, { worker?: string; reviewer?: string }>;
   lastUpdated: string;
+  /**
+   * How many times this checkpoint has been auto-recovered by
+   * reconcileStaleCheckpoint (worker/reviewer processes died mid-run, e.g.
+   * after a gateway restart). Used to cap retries so a genuinely broken task
+   * does not loop forever.
+   */
+  resumeCount?: number;
 }
 
 export interface HarnessRunResult {
