@@ -18,9 +18,8 @@ import {
   saveCheckpoint,
   updateTaskStatus,
 } from "../checkpoint";
-import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
+import { initReviewLoop, buildReviewRequest } from "../review-loop";
 import { runReviewerConsensus } from "../reviewer-consensus";
-import { runMetaReview } from "../meta-reviewer";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
 import { resolveModelAlias } from "../model-resolution";
 import { resolveReviewerExecutionTarget, runReviewerWithCodexCli } from "../reviewer-runner";
@@ -762,266 +761,25 @@ async function executeTask(
       };
     }
 
-    updateTaskStatus(checkpoint, task.id, "in-review", workdir, { workerResult });
-
-    // --- Review phase: cross-model review loop ---
-    const reviewLoop = initReviewLoop(task.id);
-    let currentWorkerResult = workerResult;
-    // Track the Codex reviewer session ID for same-session continuity
-    // across re-reviews within this task. The first review creates the
-    // session; subsequent reviews resume it so the reviewer remembers
-    // previous gaps and context.
-    let reviewerCodexSessionId: string | undefined;
-
-    while (!reviewLoop.passed && !reviewLoop.escalated) {
-      let reviewResult: ReviewResult | null = null;
-      let reviewerRetryCount = 0;
-
-      while (true) {
-        const reviewBudget = Math.min(perPhaseBudget, remainingBudget);
-        remainingBudget -= reviewBudget;
-
-        // Reviewer consensus: run primary + secondary in parallel
-        const consensusResult = await runReviewerConsensus({
-          task,
-          workerResult: currentWorkerResult,
-          originalRequest: plan.originalRequest,
-          reviewLoopState: reviewLoop,
-          workdir,
-          resumeSessionId: reviewerCodexSessionId,
-        });
-
-        // Capture primary Codex session ID for subsequent resumes
-        if (!reviewerCodexSessionId && consensusResult.primarySessionId) {
-          reviewerCodexSessionId = consensusResult.primarySessionId;
-        }
-        recordSession(checkpoint, task.id, "reviewer", consensusResult.primarySessionId ?? `consensus-${consensusResult.mode}`, workdir);
-
-        console.log(
-          `[harness] Reviewer consensus done: task=${task.id}, loop=${reviewLoop.history.length + 1}, mode=${consensusResult.mode}, result=${consensusResult.consensus.result}`,
-        );
-
-        reviewResult = consensusResult.consensus;
-        if (!reviewResult.retryReviewer) {
-          break;
-        }
-
-        reviewerRetryCount++;
-        if (reviewerRetryCount >= 3) {
-          updateTaskStatus(checkpoint, task.id, "failed", workdir, {
-            reviewPassed: false,
-            reviewLoop: totalReviewLoops(reviewLoop.history.length),
-          });
-          return {
-            taskId: task.id,
-            workerSessionId,
-            workerResult: currentWorkerResult,
-            reviewPassed: false,
-            reviewLoops: totalReviewLoops(reviewLoop.history.length),
-            escalated: true,
-            error: "Reviewer output could not be parsed after 3 attempts",
-          };
-        }
-
-        console.warn(
-          `[harness] Reviewer output malformed: task=${task.id}, retry=${reviewerRetryCount}/3`,
-        );
-      }
-
-      if (!reviewResult) {
-        throw new Error("Reviewer result missing after retry loop");
-      }
-
-      const action = processReviewResult(reviewLoop, reviewResult);
-      console.log(`[harness] Review result: task=${task.id}, action=${action.action}, gaps=${reviewResult.gaps.length}`);
-
-      if (action.action === "pass") {
-        if (useBackendDispatch && backend) {
-          const backendCtx: WorkerExecutionContext = {
-            task, plan, workdir, ctx, workerModel, workerEffort, jobId: workerSessionId,
-          };
-          const finalizeResult = await backend.finalizeWorker(backendCtx);
-          if (finalizeResult.workerResult) {
-            currentWorkerResult = finalizeResult.workerResult;
-          }
-          if (finalizeResult.status !== "done") {
-            updateTaskStatus(checkpoint, task.id, "failed", workdir, {
-              reviewPassed: false,
-              reviewLoop: totalReviewLoops(reviewLoop.history.length),
-              reviewResult,
-              workerResult: currentWorkerResult,
-            });
-            const finalizeError = finalizeResult.error ?? `Worker finalization ended with status=${finalizeResult.status}`;
-            return {
-              taskId: task.id,
-              workerSessionId,
-              workerResult: currentWorkerResult,
-              reviewPassed: false,
-              reviewLoops: totalReviewLoops(reviewLoop.history.length),
-              escalated: true,
-              error: isRealtimeBackend
-                ? formatRealtimeFailureForCaller(ctx, workdir, finalizeError)
-                : finalizeError,
-            };
-          }
-        }
-
-        updateTaskStatus(checkpoint, task.id, "completed", workdir, {
-          reviewPassed: true,
-          reviewLoop: totalReviewLoops(reviewLoop.history.length),
-          reviewResult,
-          workerResult: currentWorkerResult,
-        });
-        return {
-          taskId: task.id,
-          workerSessionId,
-          workerResult: currentWorkerResult,
-          reviewPassed: true,
-          reviewLoops: totalReviewLoops(reviewLoop.history.length),
-          escalated: false,
-        };
-      }
-
-      if (action.action === "escalate") {
-        // Meta-reviewer mediation before escalating to human.
-        // Gives one more chance to resolve disagreements between worker and reviewer.
-        console.log(`[harness] Fix loop exhausted for task=${task.id}, running meta-reviewer...`);
-        const metaResult = await runMetaReview({ task, plan, reviewLoopState: reviewLoop, workdir });
-        console.log(`[harness] Meta-reviewer verdict: ${metaResult.verdict} — ${metaResult.reasoning}`);
-
-        if (metaResult.verdict === "approve") {
-          // Meta-reviewer says gaps are acceptable — force pass
-          updateTaskStatus(checkpoint, task.id, "completed", workdir, {
-            reviewPassed: true,
-            reviewLoop: totalReviewLoops(reviewLoop.history.length),
-            reviewResult,
-            workerResult: currentWorkerResult,
-          });
-          return {
-            taskId: task.id,
-            workerSessionId,
-            workerResult: currentWorkerResult,
-            reviewPassed: true,
-            reviewLoops: totalReviewLoops(reviewLoop.history.length),
-            escalated: false,
-          };
-        }
-
-        if (metaResult.verdict === "revise" && metaResult.consolidatedFixPrompt) {
-          // Meta-reviewer provides one bonus fix attempt
-          console.log(`[harness] Meta-reviewer grants bonus fix round for task=${task.id}`);
-          if (useBackendDispatch && backend) {
-            const backendCtx: WorkerExecutionContext = {
-              task, plan, workdir, ctx, workerModel, workerEffort, jobId: workerSessionId,
-            };
-            const bonusResult = await backend.continueWorker(backendCtx, metaResult.consolidatedFixPrompt);
-            if (bonusResult.workerResult) {
-              currentWorkerResult = bonusResult.workerResult;
-              updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
-                reviewPassed: false,
-                reviewLoop: totalReviewLoops(reviewLoop.history.length),
-                reviewResult,
-                workerResult: currentWorkerResult,
-              });
-              // Reset escalation flag and continue the review loop for one more round
-              reviewLoop.escalated = false;
-              continue;
-            }
-          }
-        }
-
-        // Meta-reviewer says reject (or revise failed) — escalate to human
-        updateTaskStatus(checkpoint, task.id, "failed", workdir, {
-          reviewPassed: false,
-          reviewLoop: totalReviewLoops(reviewLoop.history.length),
-          reviewResult,
-        });
-        return {
-          taskId: task.id,
-          workerSessionId,
-          workerResult: currentWorkerResult,
-          reviewPassed: false,
-          reviewLoops: totalReviewLoops(reviewLoop.history.length),
-          escalated: true,
-          escalationReason: formatEscalation(plan, reviewLoop, task),
-        };
-      }
-
-      // action === "fix": feed gap feedback back into the worker via backend dispatch
-      if (action.action === "fix") {
-        if (useBackendDispatch && backend) {
-          const backendCtx: WorkerExecutionContext = {
-            task, plan, workdir, ctx, workerModel, workerEffort, jobId: workerSessionId,
-          };
-          const followUpResult = await backend.continueWorker(backendCtx, action.fixPrompt);
-
-          if (!isRealtimeReviewReadyStatus(followUpResult.status) || !followUpResult.workerResult) {
-            updateTaskStatus(checkpoint, task.id, "failed", workdir, {
-              reviewPassed: false,
-              reviewLoop: totalReviewLoops(reviewLoop.history.length),
-              reviewResult,
-              workerResult: followUpResult.workerResult ?? currentWorkerResult,
-            });
-            const followUpError = followUpResult.errorDetail
-              ?? followUpResult.error
-              ?? `Worker follow-up ended with status=${followUpResult.status}`;
-            return {
-              taskId: task.id,
-              workerSessionId,
-              workerResult: followUpResult.workerResult ?? currentWorkerResult,
-              reviewPassed: false,
-              reviewLoops: totalReviewLoops(reviewLoop.history.length),
-              escalated: true,
-              escalationReason: formatEscalation(plan, reviewLoop, task),
-              error: isRealtimeBackend
-                ? formatRealtimeFailureForCaller(ctx, workdir, followUpError)
-                : followUpError,
-            };
-          }
-
-          currentWorkerResult = followUpResult.workerResult;
-          updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
-            reviewPassed: false,
-            reviewLoop: totalReviewLoops(reviewLoop.history.length),
-            reviewResult,
-            workerResult: currentWorkerResult,
-          });
-          continue;
-        }
-
-        // Fallback fix path (tier 0 edge case only — should not normally be reached)
-        console.warn(`[harness] Fix fallback via sessionManager.spawn: task=${task.id}, loop=${reviewLoop.currentLoop}`);
-        const fixBudget = Math.min(perPhaseBudget, remainingBudget);
-        remainingBudget -= fixBudget;
-        const fixSession = activeSessionManager.spawn({
-          prompt: action.fixPrompt,
-          name: `harness-${plan.id}-${task.id}-fix-${reviewLoop.currentLoop}`,
-          workdir,
-          model: workerModel,
-          maxBudgetUsd: fixBudget,
-          permissionMode: pluginConfig.permissionMode ?? "bypassPermissions",
-          originChannel: ctx.messageChannel,
-          originAgentId: ctx.agentId,
-          multiTurn: false,
-        });
-        const fixResult = await waitForCompletion(fixSession.id, task.id);
-        if (fixResult) {
-          currentWorkerResult = fixResult;
-        }
-        // Continue loop → next review iteration
-      }
-    }
-
-    // Should not reach here, but safety fallback
+    // --- Worker done → task complete ---
+    // Review is handled by the worker-side cc-implementation-review.sh (Layer 1).
+    // Worker reaching "done" means the Codex review already passed.
+    // No Layer 2 harness self-review — it can't fix code after worker exits,
+    // so it only creates false-positive escalation loops.
+    updateTaskStatus(checkpoint, task.id, "completed", workdir, {
+      reviewPassed: true,
+      reviewLoop: totalReviewLoops(0),
+      workerResult,
+    });
     return {
       taskId: task.id,
       workerSessionId,
-      workerResult: currentWorkerResult,
-      reviewPassed: false,
-      reviewLoops: totalReviewLoops(reviewLoop.history.length),
-      escalated: true,
-      error: "Review loop exited unexpectedly",
+      workerResult,
+      reviewPassed: true,
+      reviewLoops: totalReviewLoops(0),
+      escalated: false,
     };
+
   } catch (err: any) {
     updateTaskStatus(checkpoint, task.id, "failed", workdir);
     const detailedError = `${err.message}\n${err.stack ?? ""}`;
