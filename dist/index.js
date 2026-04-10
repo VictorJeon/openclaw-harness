@@ -5789,8 +5789,18 @@ function normalizeCodexModel(model) {
 }
 function buildCodexReviewerCommand(options) {
   const isResume = !!options.resumeSessionId;
-  const args = isResume ? ["exec", "resume", "--skip-git-repo-check", options.resumeSessionId, "-"] : ["exec", "-", "--skip-git-repo-check"];
-  args.push(
+  const args = isResume ? [
+    "exec",
+    "resume",
+    "--skip-git-repo-check",
+    "--output-last-message",
+    options.outputFile,
+    options.resumeSessionId,
+    "-"
+  ] : [
+    "exec",
+    "-",
+    "--skip-git-repo-check",
     "--sandbox",
     "read-only",
     "--color",
@@ -5799,7 +5809,7 @@ function buildCodexReviewerCommand(options) {
     options.outputFile,
     "-C",
     options.workdir
-  );
+  ];
   if (options.model) {
     args.push("-m", options.model);
   }

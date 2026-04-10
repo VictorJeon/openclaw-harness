@@ -117,23 +117,25 @@ export function buildCodexReviewerCommand(options: {
 }): CodexReviewerCommand {
   const isResume = !!options.resumeSessionId;
 
-  // First review: `codex exec - --skip-git-repo-check ...`
-  // Re-review:    `codex exec resume --skip-git-repo-check <id> - ...`
-  // Note: --skip-git-repo-check must come BEFORE SESSION_ID in resume mode
+  // First review:  codex exec - --skip-git-repo-check --sandbox read-only -C <dir> ...
+  // Re-review:     codex exec resume --skip-git-repo-check -o <file> <id> -
+  //                (resume only supports: --skip-git-repo-check, -o, -m, -c, --json)
   const args = isResume
-    ? ["exec", "resume", "--skip-git-repo-check", options.resumeSessionId!, "-"]
-    : ["exec", "-", "--skip-git-repo-check"];
-
-  args.push(
-    "--sandbox",
-    "read-only",
-    "--color",
-    "never",
-    "--output-last-message",
-    options.outputFile,
-    "-C",
-    options.workdir,
-  );
+    ? [
+        "exec", "resume",
+        "--skip-git-repo-check",
+        "--output-last-message", options.outputFile,
+        options.resumeSessionId!,
+        "-",
+      ]
+    : [
+        "exec", "-",
+        "--skip-git-repo-check",
+        "--sandbox", "read-only",
+        "--color", "never",
+        "--output-last-message", options.outputFile,
+        "-C", options.workdir,
+      ];
 
   if (options.model) {
     args.push("-m", options.model);
