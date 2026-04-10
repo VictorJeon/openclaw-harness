@@ -3131,6 +3131,11 @@ function resolveAgentChannel(workdir) {
       return channel;
     }
   }
+  const fallback = config.fallbackChannel;
+  if (fallback) {
+    console.log(`[resolveAgentChannel] No match for ${workdir}, using fallbackChannel=${fallback}`);
+    return fallback;
+  }
   return void 0;
 }
 function hasValidOriginChannel(session) {

@@ -277,6 +277,15 @@ export function resolveAgentChannel(workdir: string): string | undefined {
       return channel;
     }
   }
+
+  // Fallback: use config.fallbackChannel so notifications aren't silently lost
+  // when working on a project not explicitly listed in agentChannels.
+  const fallback = config.fallbackChannel;
+  if (fallback) {
+    console.log(`[resolveAgentChannel] No match for ${workdir}, using fallbackChannel=${fallback}`);
+    return fallback;
+  }
+
   return undefined;
 }
 
