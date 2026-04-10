@@ -1,137 +1,67 @@
 # Development
 
+> Last updated: 2026-04-10
+
 ## Project layout
 
-```txt
+```
 openclaw-harness/
-├── index.ts
-├── openclaw.plugin.json
+├── index.ts                          # Plugin entry + GC (stale cleanup)
+├── openclaw.plugin.json              # Schema + config defaults
 ├── package.json
 ├── src/
-│   ├── backend/
-│   │   ├── factory.ts
-│   │   ├── local-cc.ts
-│   │   ├── remote-realtime.ts
-│   │   ├── types.ts
-│   │   └── index.ts
-│   ├── checkpoint.ts
-│   ├── planner.ts
-│   ├── review-loop.ts
-│   ├── reviewer.ts
-│   ├── router.ts
-│   ├── session-manager.ts
-│   ├── session.ts
-│   ├── shared.ts
 │   ├── tools/
-│   │   ├── harness-execute.ts        # primary path
-│   │   ├── claude-launch.ts          # legacy
-│   │   ├── claude-sessions.ts        # legacy
-│   │   ├── claude-output.ts          # legacy
-│   │   ├── claude-fg.ts              # legacy
-│   │   ├── claude-bg.ts              # legacy
-│   │   ├── claude-kill.ts            # legacy
-│   │   ├── claude-respond.ts         # legacy
-│   │   └── claude-stats.ts
-│   └── commands/
-│       └── claude*.ts                # legacy chat-command surface
+│   │   └── harness-execute.ts        # Primary: async orchestration + heartbeat
+│   ├── router.ts                     # 3-layer: pattern → keyword → LLM
+│   ├── planner.ts                    # Model-backed task decomposition
+│   ├── reviewer-consensus.ts         # Parallel Codex + GLM consensus
+│   ├── meta-reviewer.ts             # Escalation mediation
+│   ├── reviewer-runner.ts            # Codex CLI wrapper (session resume)
+│   ├── reviewer-openrouter.ts        # OpenRouter API wrapper (GLM secondary)
+│   ├── reviewer.ts                   # Review prompt + parse + severity filter
+│   ├── review-loop.ts               # Fix cycle state machine
+│   ├── gap-types.ts                  # 5-type taxonomy + severity weights
+│   ├── checkpoint.ts                 # Persistence + stale cleanup
+│   ├── model-resolution.ts           # Model alias resolution
+│   ├── workspace-isolation.ts         # Git clone for dirty worktrees
+│   ├── shared.ts                     # Global state + config proxy
+│   ├── types.ts                      # All type definitions
+│   ├── backend/
+│   │   ├── factory.ts                # Backend selection
+│   │   ├── remote-realtime.ts        # Hetzner worker
+│   │   ├── local-cc.ts              # Local Claude CLI worker
+│   │   └── types.ts                  # Backend interfaces
+│   ├── session.ts                    # Legacy session lifecycle
+│   ├── session-manager.ts            # Legacy session pool
+│   ├── notifications.ts              # NotificationRouter
+│   ├── gateway.ts                    # RPC methods
+│   └── tools/claude-*.ts + commands/ # Legacy surface
+├── tests/run.js                      # 40 tests
 └── docs/
 ```
 
----
-
 ## Where to change what
 
-### Routing / decomposition
-- `src/router.ts`
-- `src/planner.ts`
-
-### Backend seam definitions
-- `src/backend/*`
-- `src/types.ts`
-- `src/shared.ts`
-- `openclaw.plugin.json`
-
-### Review / fix loop behavior
-- `src/review-loop.ts`
-- `src/tools/harness-execute.ts`
-
-### Tier 2 realtime behavior
-- `src/tools/harness-execute.ts`
-- external helper script: `~/.openclaw/workspace-nova/scripts/claude-realtime.sh`
-- sync helper: `~/.openclaw/workspace-nova/scripts/git-sync.sh`
-
-### Legacy direct-session behavior
-- `src/session.ts`
-- `src/session-manager.ts`
-- `src/tools/claude-*.ts`
-- `src/commands/claude-*.ts`
-
----
-
-## Current implementation notes
-
-### Tier 1
-- default: `claude-realtime.sh` worker on Hetzner
-- opt-in: local Claude Code CLI worker via `workerBackend="local-cc"`
-- Codex CLI review
-- remote-realtime follow-up fixes continue in same worker session
-- local-cc follow-up fixes rerun a fresh local Claude CLI round with persisted `jobId` state
-
-### Tier 2
-- same backend split as Tier 1
-- embedded caller-agent plan review
-- remote-realtime sync-back before Codex review
-- completed realtime worker results recover on resume
-- local-cc state lives under `/tmp/openclaw-harness-local-cc/...`
-
-### Backend migration note
-- runtime dispatch now flows through `src/backend/*` for tier 1+
-- default backend remains `remote-realtime`
-- `local-cc` is implemented as an opt-in local Claude Code CLI lane
-
-### Planner behavior
-- planner is deterministic; do not assume a hidden model call here
-- common single-feature workflows should usually stay one task
-- avoid reintroducing over-decomposition for tiny coding requests
-
----
+| Area | Files |
+|------|-------|
+| Tier routing | `router.ts` |
+| Task decomposition | `planner.ts` |
+| Async execution + heartbeat | `tools/harness-execute.ts` |
+| Reviewer consensus | `reviewer-consensus.ts` + `reviewer-openrouter.ts` |
+| Meta-reviewer | `meta-reviewer.ts` |
+| Review loop + session continuity | `review-loop.ts` + `reviewer-runner.ts` |
+| Gap severity | `gap-types.ts` + `reviewer.ts` |
+| Stale cleanup | `checkpoint.ts` + `index.ts` |
+| Config schema | `openclaw.plugin.json` + `types.ts` + `shared.ts` (all 3 required) |
 
 ## Build / reload
 
 ```bash
-cd /Users/nova/.openclaw/extensions/openclaw-harness
-npm run build
-openclaw gateway restart
+npm run build && openclaw gateway restart
 ```
 
-Notes:
-- docs-only edits do **not** require a restart
-- plugin code edits do require restart after rebuild
-- treat gateway restart as expensive; batch changes when possible
+## Test
 
----
-
-## Validation habits
-
-When changing harness behavior, prefer direct proof over inference:
-- inspect checkpoint files in `/tmp/harness/.../checkpoint.json`
-- inspect realtime state in `/tmp/claude-realtime/...`
-- verify repo state with `git log`, file reads, and tests
-- do at least one fresh smoke for the changed path
-
-Typical smoke patterns:
-- **tier 1**: small repo + realtime worker launch + Codex review + one follow-up fix
-- **tier 1 local-cc**: small repo + local Claude CLI worker + Codex review + one follow-up fix
-- **tier 2**: backend-selected worker + embedded plan review + follow-up + final Codex review
-
----
-
-## Documentation maintenance rule
-
-If you change any of these, update docs in the same PR/commit set:
-- tier routing rules
-- planner decomposition rules
-- whether router/planner are deterministic vs model-driven
-- review loop behavior
-- worker/reviewer model choice
-- legacy vs primary execution guidance
+```bash
+npm run test    # 40 tests
+```

@@ -4,6 +4,9 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -25,6 +28,228 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+// src/checkpoint.ts
+var checkpoint_exports = {};
+__export(checkpoint_exports, {
+  cleanupStaleCheckpoints: () => cleanupStaleCheckpoints,
+  findRecoverableCheckpoint: () => findRecoverableCheckpoint,
+  getPendingTasks: () => getPendingTasks,
+  initCheckpoint: () => initCheckpoint,
+  loadCheckpoint: () => loadCheckpoint,
+  recordSession: () => recordSession,
+  saveCheckpoint: () => saveCheckpoint,
+  updateTaskStatus: () => updateTaskStatus
+});
+function normalizeWorkdirPath(workdir) {
+  const resolved = (0, import_path3.resolve)(workdir);
+  try {
+    return typeof import_fs3.realpathSync.native === "function" ? import_fs3.realpathSync.native(resolved) : (0, import_fs3.realpathSync)(resolved);
+  } catch {
+    return resolved;
+  }
+}
+function checkpointDir(workdir, runId) {
+  return (0, import_path3.join)("/tmp", "harness", runId);
+}
+function checkpointPath(workdir, runId) {
+  return (0, import_path3.join)(checkpointDir(workdir, runId), "checkpoint.json");
+}
+function initCheckpoint(plan, workdir, executionWorkdir = workdir) {
+  const checkpoint = {
+    runId: plan.id,
+    workdir: normalizeWorkdirPath(workdir),
+    executionWorkdir: normalizeWorkdirPath(executionWorkdir),
+    status: "running",
+    plan,
+    tasks: plan.tasks.map((t) => ({
+      id: t.id,
+      status: "pending"
+    })),
+    sessions: {},
+    lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  saveCheckpoint(checkpoint, workdir);
+  return checkpoint;
+}
+function saveCheckpoint(checkpoint, workdir) {
+  const dir = checkpointDir(workdir, checkpoint.runId);
+  try {
+    if (!(0, import_fs3.existsSync)(dir)) {
+      (0, import_fs3.mkdirSync)(dir, { recursive: true });
+    }
+    const path = checkpointPath(workdir, checkpoint.runId);
+    (0, import_fs3.writeFileSync)(path, JSON.stringify(checkpoint, null, 2));
+    console.log(`[checkpoint] Saved: ${path}`);
+  } catch (err) {
+    console.error(`[checkpoint] Failed to save: ${err.message}`);
+  }
+}
+function loadCheckpoint(runId, workdir) {
+  const path = checkpointPath(workdir, runId);
+  try {
+    if (!(0, import_fs3.existsSync)(path)) return null;
+    const raw = (0, import_fs3.readFileSync)(path, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error(`[checkpoint] Failed to load: ${err.message}`);
+    return null;
+  }
+}
+function updateTaskStatus(checkpoint, taskId, status, workdir, extra) {
+  const task = checkpoint.tasks.find((t) => t.id === taskId);
+  if (!task) {
+    console.warn(`[checkpoint] Task ${taskId} not found in checkpoint ${checkpoint.runId}`);
+    return;
+  }
+  task.status = status;
+  if (extra) {
+    if (extra.reviewPassed !== void 0) task.reviewPassed = extra.reviewPassed;
+    if (extra.reviewLoop !== void 0) task.reviewLoop = extra.reviewLoop;
+    if (extra.workerResult) task.workerResult = extra.workerResult;
+    if (extra.reviewResult) task.reviewResult = extra.reviewResult;
+  }
+  checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+  const hasActive = checkpoint.tasks.some(
+    (t) => t.status === "in-progress" || t.status === "in-review"
+  );
+  const hasFailed = checkpoint.tasks.some((t) => t.status === "failed");
+  const allDone = checkpoint.tasks.every(
+    (t) => t.status === "completed" || t.status === "failed"
+  );
+  const allPassed = checkpoint.tasks.every(
+    (t) => t.status === "completed" && t.reviewPassed
+  );
+  if (allDone) {
+    checkpoint.status = allPassed ? "complete" : "failed";
+  } else if (hasFailed && !hasActive) {
+    checkpoint.status = "failed";
+  } else {
+    checkpoint.status = "running";
+  }
+  saveCheckpoint(checkpoint, workdir);
+}
+function recordSession(checkpoint, taskId, role, sessionId, workdir) {
+  if (!checkpoint.sessions[taskId]) {
+    checkpoint.sessions[taskId] = {};
+  }
+  checkpoint.sessions[taskId][role] = sessionId;
+  checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+  saveCheckpoint(checkpoint, workdir);
+}
+function getPendingTasks(checkpoint) {
+  return checkpoint.tasks.filter((t) => t.status === "pending" || t.status === "in-progress").map((t) => t.id);
+}
+function isRecordedSessionAlive(sessionId) {
+  if (!sessionId) return false;
+  const pidMatch = sessionId.match(/-(\d{5,})$/);
+  if (!pidMatch) return true;
+  const pid = Number(pidMatch[1]);
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    (0, import_process.kill)(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function checkpointHasLiveSession(checkpoint) {
+  const taskStates = new Map(checkpoint.tasks.map((task) => [task.id, task.status]));
+  return Object.entries(checkpoint.sessions ?? {}).some(([taskId, session]) => {
+    const status = taskStates.get(taskId);
+    if (status !== "in-progress" && status !== "in-review") return false;
+    return isRecordedSessionAlive(session.worker) || isRecordedSessionAlive(session.reviewer);
+  });
+}
+function reconcileStaleCheckpoint(checkpoint, workdir) {
+  if (checkpoint.status !== "running") return checkpoint;
+  if (checkpointHasLiveSession(checkpoint)) return checkpoint;
+  const hasFailed = checkpoint.tasks.some((task) => task.status === "failed");
+  const hasCompleted = checkpoint.tasks.some((task) => task.status === "completed");
+  const hasReviewPending = checkpoint.tasks.some((task) => task.status === "in-review");
+  const hasWorkInProgress = checkpoint.tasks.some((task) => task.status === "in-progress");
+  if (hasReviewPending || hasWorkInProgress) {
+    checkpoint.tasks = checkpoint.tasks.map((task) => {
+      if (task.status === "in-review" || task.status === "in-progress") {
+        return { ...task, status: "failed", reviewPassed: false };
+      }
+      return task;
+    });
+  }
+  if (checkpoint.tasks.every((task) => task.status === "completed" && task.reviewPassed)) {
+    checkpoint.status = "complete";
+  } else if (hasFailed || hasCompleted || hasReviewPending || hasWorkInProgress) {
+    checkpoint.status = "failed";
+  } else {
+    checkpoint.status = "failed";
+  }
+  checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+  saveCheckpoint(checkpoint, workdir);
+  return checkpoint;
+}
+function findRecoverableCheckpoint(request, workdir) {
+  const checkpointsRoot = (0, import_path3.join)("/tmp", "harness");
+  const normalizedWorkdir = normalizeWorkdirPath(workdir);
+  try {
+    if (!(0, import_fs3.existsSync)(checkpointsRoot)) return null;
+    const matches = (0, import_fs3.readdirSync)(checkpointsRoot).map((runId) => (0, import_path3.join)(checkpointsRoot, runId, "checkpoint.json")).filter((path) => (0, import_fs3.existsSync)(path)).map((path) => {
+      try {
+        const raw = (0, import_fs3.readFileSync)(path, "utf-8");
+        const parsed = JSON.parse(raw);
+        return reconcileStaleCheckpoint(parsed, workdir);
+      } catch {
+        return null;
+      }
+    }).filter((checkpoint) => checkpoint !== null).filter((checkpoint) => checkpoint.status === "running").filter((checkpoint) => checkpoint.plan?.originalRequest === request).filter((checkpoint) => normalizeWorkdirPath(checkpoint.workdir ?? "") === normalizedWorkdir || normalizeWorkdirPath(checkpoint.executionWorkdir ?? "") === normalizedWorkdir).filter((checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0).sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
+    return matches[0] ?? null;
+  } catch (err) {
+    console.warn(`[checkpoint] Failed to search recoverable checkpoints: ${err?.message ?? String(err)}`);
+    return null;
+  }
+}
+function cleanupStaleCheckpoints() {
+  const checkpointsRoot = (0, import_path3.join)("/tmp", "harness");
+  if (!(0, import_fs3.existsSync)(checkpointsRoot)) return { removed: 0, errors: 0 };
+  const now = Date.now();
+  let removed = 0;
+  let errors = 0;
+  try {
+    for (const dirName of (0, import_fs3.readdirSync)(checkpointsRoot)) {
+      const dirPath = (0, import_path3.join)(checkpointsRoot, dirName);
+      const cpPath = (0, import_path3.join)(dirPath, "checkpoint.json");
+      if (!(0, import_fs3.existsSync)(cpPath)) continue;
+      try {
+        const cp = JSON.parse((0, import_fs3.readFileSync)(cpPath, "utf-8"));
+        const lastUpdated = Date.parse(cp.lastUpdated || "");
+        if (isNaN(lastUpdated)) continue;
+        const age = now - lastUpdated;
+        const isTerminal = cp.status === "complete" || cp.status === "failed" || cp.status === "escalated" || cp.status === "aborted";
+        const shouldRemove = isTerminal ? age > STALE_COMPLETE_MS : cp.status === "running" && age > STALE_PLANNING_MS;
+        if (shouldRemove) {
+          (0, import_fs3.rmSync)(dirPath, { recursive: true, force: true });
+          removed++;
+        }
+      } catch {
+        errors++;
+      }
+    }
+  } catch {
+  }
+  if (removed > 0) {
+    console.log(`[checkpoint] Stale cleanup: removed ${removed} plan(s), errors ${errors}`);
+  }
+  return { removed, errors };
+}
+var import_fs3, import_process, import_path3, STALE_PLANNING_MS, STALE_COMPLETE_MS;
+var init_checkpoint = __esm({
+  "src/checkpoint.ts"() {
+    import_fs3 = require("fs");
+    import_process = require("process");
+    import_path3 = require("path");
+    STALE_PLANNING_MS = 30 * 60 * 1e3;
+    STALE_COMPLETE_MS = 60 * 60 * 1e3;
+  }
+});
 
 // index.ts
 var index_exports = {};
@@ -2732,6 +2957,8 @@ function setPluginConfig(config) {
     workerModel: config.workerModel,
     workerEffort: config.workerEffort,
     reviewerReasoningEffort: config.reviewerReasoningEffort,
+    consensusReviewerModel: config.consensusReviewerModel,
+    openRouterApiKey: config.openRouterApiKey,
     workerBackend: config.workerBackend ?? "remote-realtime",
     memoryV3Endpoint: config.memoryV3Endpoint,
     routerMaxTokens: config.routerMaxTokens ?? 500,
@@ -4145,7 +4372,7 @@ var TIER2_KEYWORDS = [
   "\uB300\uADDC\uBAA8",
   "large scale"
 ];
-function classifyRequest(request) {
+async function classifyRequest(request) {
   const normalized = request.toLowerCase().trim();
   for (const pattern of TIER0_PATTERNS) {
     if (pattern.test(request)) {
@@ -4200,17 +4427,19 @@ function classifyRequest(request) {
       reason: `Multiple tasks detected: ${taskCount}`
     };
   }
+  const llmResult = await classifyWithLlm(request);
+  if (llmResult) return llmResult;
   if (normalized.length > 200) {
     return {
       tier: 2,
       confidence: "fallback",
-      reason: `Long ambiguous request (${normalized.length} chars), fallback heuristics chose tier 2`
+      reason: `Long ambiguous request (${normalized.length} chars), LLM unavailable, heuristic chose tier 2`
     };
   }
   return {
     tier: 1,
     confidence: "fallback",
-    reason: "No strong signals \u2014 fallback heuristics defaulted to tier 1"
+    reason: "No strong signals, LLM unavailable \u2014 heuristic defaulted to tier 1"
   };
 }
 function countTasks(request) {
@@ -4226,6 +4455,73 @@ function countTasks(request) {
   const commaSegments = request.split(/[,，]/).filter((s) => s.trim().length > 10);
   if (commaSegments.length >= 3) return commaSegments.length;
   return 0;
+}
+var LLM_ROUTER_PROMPT = `You are a task complexity classifier. Given a coding task request, classify it as exactly one tier:
+
+- tier 1: Single bug fix, single feature, single refactor, or a small focused change. One logical unit of work.
+- tier 2: Multiple interrelated changes, migration, architecture change, multi-file refactor, or a task that needs decomposition into subtasks.
+
+Respond with ONLY a JSON object, no other text:
+{"tier": 1 or 2, "reason": "one sentence explanation"}`;
+var LLM_ROUTER_TIMEOUT_MS = 15e3;
+async function classifyWithLlm(request) {
+  const sm = getSessionManager();
+  if (!sm) return null;
+  const routerModel = pluginConfig.plannerModel || "sonnet";
+  try {
+    const session = sm.spawn({
+      prompt: `${LLM_ROUTER_PROMPT}
+
+Request:
+${request.slice(0, 2e3)}`,
+      name: `router-llm-${Date.now()}`,
+      workdir: process.cwd(),
+      model: routerModel,
+      maxBudgetUsd: 0.05,
+      permissionMode: "default",
+      allowedTools: [],
+      multiTurn: false,
+      internal: true
+    });
+    const startTime = Date.now();
+    while (Date.now() - startTime < LLM_ROUTER_TIMEOUT_MS) {
+      const s = sm.get(session.id);
+      if (!s) break;
+      if (s.status === "completed" || s.status === "failed" || s.status === "killed") {
+        const output = s.getOutput().join("\n").trim();
+        const parsed = parseLlmRouterOutput(output);
+        if (parsed) {
+          console.log(`[router] LLM classification: tier=${parsed.tier}, model=${routerModel}, reason=${parsed.reason}`);
+          return parsed;
+        }
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    try {
+      sm.kill(session.id);
+    } catch {
+    }
+  } catch (err) {
+    console.warn(`[router] LLM classification failed: ${err?.message ?? String(err)}`);
+  }
+  return null;
+}
+function parseLlmRouterOutput(output) {
+  const jsonMatch = output.match(/\{[\s\S]*?\}/);
+  if (!jsonMatch) return null;
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    const tier = parsed.tier === 1 ? 1 : parsed.tier === 2 ? 2 : null;
+    if (tier === null) return null;
+    return {
+      tier,
+      confidence: "llm",
+      reason: `LLM: ${typeof parsed.reason === "string" ? parsed.reason.slice(0, 200) : "classified"}`
+    };
+  } catch {
+    return null;
+  }
 }
 function isLikelySingleFeatureWorkflow(request) {
   const normalized = request.toLowerCase();
@@ -4406,7 +4702,9 @@ function validatePlannerTask(raw, index) {
   const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `task-${index + 1}`;
   const title = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : null;
   if (!title) return null;
+  if (shouldIgnoreStandaloneTaskBullet(title)) return null;
   const scope = typeof raw.scope === "string" && raw.scope.trim() ? raw.scope.trim() : title;
+  const normalizedScope = scope.trim() || title;
   const agent = typeof raw.agent === "string" && raw.agent.trim() ? raw.agent.trim() : "codex";
   let acceptanceCriteria = [];
   if (Array.isArray(raw.acceptance_criteria)) {
@@ -4415,7 +4713,7 @@ function validatePlannerTask(raw, index) {
   if (acceptanceCriteria.length === 0) {
     acceptanceCriteria = [title];
   }
-  return { id, title, scope, acceptance_criteria: acceptanceCriteria, agent };
+  return { id, title, scope: normalizedScope, acceptance_criteria: acceptanceCriteria, agent };
 }
 var VALID_MODES = /* @__PURE__ */ new Set(["parallel", "sequential", "solo"]);
 var VALID_COMPLEXITIES = /* @__PURE__ */ new Set(["low", "medium", "high"]);
@@ -4457,9 +4755,10 @@ function parsePlannerJsonFromString(jsonStr) {
     estimated_complexity: VALID_COMPLEXITIES.has(complexityRaw) ? complexityRaw : "high"
   };
 }
-function yamlToHarnessPlan(parsed, request, metadata) {
+function yamlToHarnessPlan(parsed, request, metadata, tier = 2) {
   const normalized = normalizePlannerTasks(parsed.tasks);
-  const tasks = normalized.map((task, index) => ({
+  const pruned = pruneRedundantPlannerTasks(normalized, request);
+  const tasks = pruned.map((task, index) => ({
     id: nextTaskId(index),
     title: task.title.length > 60 ? task.title.slice(0, 57) + "..." : task.title,
     scope: task.scope,
@@ -4475,9 +4774,36 @@ function yamlToHarnessPlan(parsed, request, metadata) {
     tasks: cappedTasks,
     mode: cappedTasks.length === 1 ? "solo" : modeNorm === "parallel" ? "parallel" : modeNorm === "solo" ? "solo" : "sequential",
     estimatedComplexity: complexityNorm === "low" ? "low" : complexityNorm === "medium" ? "medium" : "high",
-    tier: 2,
+    tier,
     plannerMetadata: metadata
   };
+}
+function pruneRedundantPlannerTasks(tasks, request) {
+  if (tasks.length <= 1) return tasks;
+  const cleanupSignals = /(abort older active|stale harness runs|leftover pid|lock files?|clean state|terminate older)/i;
+  const outputContractSignals = /(return exactly|output only|artifact path|five lines|stdout|stderr|exit code|final realtime status|first blocking error)/i;
+  const requestSuggestsSingleFlow = cleanupSignals.test(request) && outputContractSignals.test(request);
+  if (!requestSuggestsSingleFlow) return tasks;
+  const verificationSignals = /(verify|validation|validate|smoke|report|return exactly|output only|artifact path|five lines|stdout|stderr|exit code|final realtime status|first blocking error)/i;
+  const implementationTasks = tasks.filter((task) => !verificationSignals.test(`${task.title}
+${task.scope}`));
+  const verificationTasks = tasks.filter((task) => verificationSignals.test(`${task.title}
+${task.scope}`));
+  if (implementationTasks.length !== 1 || verificationTasks.length === 0) {
+    return tasks;
+  }
+  const primary = {
+    ...implementationTasks[0],
+    acceptance_criteria: unique([
+      ...implementationTasks[0].acceptance_criteria,
+      ...verificationTasks.flatMap((task) => task.acceptance_criteria)
+    ])
+  };
+  primary.scope = mergeScope(
+    primary.scope,
+    verificationTasks.map((task) => task.scope).join("\n")
+  );
+  return [primary];
 }
 function normalizePlannerTasks(tasks) {
   const merged = [];
@@ -4562,7 +4888,7 @@ async function runPlannerWithSession(input) {
     launchModel: plannerSession.model ?? input.requestedModel
   };
 }
-async function buildModelPlan(request, memoryContext = "", workdir = process.cwd(), runner = runPlannerWithSession) {
+async function buildModelPlan(request, memoryContext = "", workdir = process.cwd(), runner = runPlannerWithSession, tier = 2) {
   const prompt = buildPlannerPrompt(request, memoryContext);
   const plannerModels = uniquePlannerModels([
     pluginConfig.plannerModel || "opus",
@@ -4571,7 +4897,7 @@ async function buildModelPlan(request, memoryContext = "", workdir = process.cwd
   const failures = [];
   for (const requestedModel of plannerModels) {
     try {
-      console.log(`[planner] Attempting model-backed planning with model=${requestedModel}`);
+      console.log(`[planner] Attempting model-backed planning with model=${requestedModel}, tier=${tier}`);
       const result = await runner({ prompt, requestedModel, workdir });
       const parsed = parsePlannerJson(result.output);
       if (!parsed) {
@@ -4584,7 +4910,7 @@ async function buildModelPlan(request, memoryContext = "", workdir = process.cwd
         fallbackReason: formatPlannerFailures(failures)
       };
       console.log(`[planner] Model-backed plan created: model=${metadata.model ?? requestedModel}, tasks=${parsed.tasks.length}, mode=${parsed.mode}`);
-      return yamlToHarnessPlan(parsed, request, metadata);
+      return yamlToHarnessPlan(parsed, request, metadata, tier);
     } catch (error) {
       const message = error?.message ?? String(error);
       failures.push(`${requestedModel}: ${message}`);
@@ -4592,7 +4918,7 @@ async function buildModelPlan(request, memoryContext = "", workdir = process.cwd
     }
   }
   console.log(`[planner] All model attempts failed, falling back to heuristic planner`);
-  const heuristicPlan = buildPlan(request, 2, memoryContext);
+  const heuristicPlan = buildPlan(request, tier, memoryContext);
   heuristicPlan.plannerMetadata = {
     backend: "heuristic",
     fallback: true,
@@ -4840,123 +5166,17 @@ function extractScopeFiles(scope) {
   return matches ? [...new Set(matches)] : [];
 }
 
-// src/checkpoint.ts
-var import_fs3 = require("fs");
-var import_path3 = require("path");
-function normalizeWorkdirPath(workdir) {
-  const resolved = (0, import_path3.resolve)(workdir);
-  try {
-    return typeof import_fs3.realpathSync.native === "function" ? import_fs3.realpathSync.native(resolved) : (0, import_fs3.realpathSync)(resolved);
-  } catch {
-    return resolved;
-  }
-}
-function checkpointDir(workdir, runId) {
-  return (0, import_path3.join)("/tmp", "harness", runId);
-}
-function checkpointPath(workdir, runId) {
-  return (0, import_path3.join)(checkpointDir(workdir, runId), "checkpoint.json");
-}
-function initCheckpoint(plan, workdir, executionWorkdir = workdir) {
-  const checkpoint = {
-    runId: plan.id,
-    workdir: normalizeWorkdirPath(workdir),
-    executionWorkdir: normalizeWorkdirPath(executionWorkdir),
-    status: "running",
-    plan,
-    tasks: plan.tasks.map((t) => ({
-      id: t.id,
-      status: "pending"
-    })),
-    sessions: {},
-    lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  saveCheckpoint(checkpoint, workdir);
-  return checkpoint;
-}
-function saveCheckpoint(checkpoint, workdir) {
-  const dir = checkpointDir(workdir, checkpoint.runId);
-  try {
-    if (!(0, import_fs3.existsSync)(dir)) {
-      (0, import_fs3.mkdirSync)(dir, { recursive: true });
-    }
-    const path = checkpointPath(workdir, checkpoint.runId);
-    (0, import_fs3.writeFileSync)(path, JSON.stringify(checkpoint, null, 2));
-    console.log(`[checkpoint] Saved: ${path}`);
-  } catch (err) {
-    console.error(`[checkpoint] Failed to save: ${err.message}`);
-  }
-}
-function updateTaskStatus(checkpoint, taskId, status, workdir, extra) {
-  const task = checkpoint.tasks.find((t) => t.id === taskId);
-  if (!task) {
-    console.warn(`[checkpoint] Task ${taskId} not found in checkpoint ${checkpoint.runId}`);
-    return;
-  }
-  task.status = status;
-  if (extra) {
-    if (extra.reviewPassed !== void 0) task.reviewPassed = extra.reviewPassed;
-    if (extra.reviewLoop !== void 0) task.reviewLoop = extra.reviewLoop;
-    if (extra.workerResult) task.workerResult = extra.workerResult;
-    if (extra.reviewResult) task.reviewResult = extra.reviewResult;
-  }
-  checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-  const hasActive = checkpoint.tasks.some(
-    (t) => t.status === "in-progress" || t.status === "in-review"
-  );
-  const hasFailed = checkpoint.tasks.some((t) => t.status === "failed");
-  const allDone = checkpoint.tasks.every(
-    (t) => t.status === "completed" || t.status === "failed"
-  );
-  const allPassed = checkpoint.tasks.every(
-    (t) => t.status === "completed" && t.reviewPassed
-  );
-  if (allDone) {
-    checkpoint.status = allPassed ? "complete" : "failed";
-  } else if (hasFailed && !hasActive) {
-    checkpoint.status = "failed";
-  } else {
-    checkpoint.status = "running";
-  }
-  saveCheckpoint(checkpoint, workdir);
-}
-function recordSession(checkpoint, taskId, role, sessionId, workdir) {
-  if (!checkpoint.sessions[taskId]) {
-    checkpoint.sessions[taskId] = {};
-  }
-  checkpoint.sessions[taskId][role] = sessionId;
-  checkpoint.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-  saveCheckpoint(checkpoint, workdir);
-}
-function getPendingTasks(checkpoint) {
-  return checkpoint.tasks.filter((t) => t.status === "pending" || t.status === "in-progress").map((t) => t.id);
-}
-function findRecoverableCheckpoint(request, workdir) {
-  const checkpointsRoot = (0, import_path3.join)("/tmp", "harness");
-  const normalizedWorkdir = normalizeWorkdirPath(workdir);
-  try {
-    if (!(0, import_fs3.existsSync)(checkpointsRoot)) return null;
-    const matches = (0, import_fs3.readdirSync)(checkpointsRoot).map((runId) => (0, import_path3.join)(checkpointsRoot, runId, "checkpoint.json")).filter((path) => (0, import_fs3.existsSync)(path)).map((path) => {
-      try {
-        const raw = (0, import_fs3.readFileSync)(path, "utf-8");
-        return JSON.parse(raw);
-      } catch {
-        return null;
-      }
-    }).filter((checkpoint) => checkpoint !== null).filter((checkpoint) => checkpoint.status === "running").filter((checkpoint) => checkpoint.plan?.originalRequest === request).filter((checkpoint) => normalizeWorkdirPath(checkpoint.workdir ?? "") === normalizedWorkdir || normalizeWorkdirPath(checkpoint.executionWorkdir ?? "") === normalizedWorkdir).filter((checkpoint) => checkpoint.tasks.some((task) => task.status !== "pending") || Object.keys(checkpoint.sessions ?? {}).length > 0).sort((a, b) => Date.parse(b.lastUpdated) - Date.parse(a.lastUpdated));
-    return matches[0] ?? null;
-  } catch (err) {
-    console.warn(`[checkpoint] Failed to search recoverable checkpoints: ${err?.message ?? String(err)}`);
-    return null;
-  }
-}
+// src/tools/harness-execute.ts
+init_checkpoint();
 
 // src/gap-types.ts
+var GAP_MIN_SEVERITY_THRESHOLD = 0.5;
 var GAP_DEFINITIONS = {
   assumption_injection: {
     type: "assumption_injection",
     label: "Assumption Injection",
     description: "Added assumptions or decisions not present in the original request.",
+    severity: 0.8,
     examples: [
       "Adding JWT authentication when not requested",
       "Choosing a specific database without being asked",
@@ -4967,6 +5187,7 @@ var GAP_DEFINITIONS = {
     type: "scope_creep",
     label: "Scope Creep",
     description: "Added features or complexity beyond what was requested.",
+    severity: 0.7,
     examples: [
       "Adding a notification system to a TODO app",
       "Building an admin dashboard when only asked for a form",
@@ -4977,6 +5198,7 @@ var GAP_DEFINITIONS = {
     type: "direction_drift",
     label: "Direction Drift",
     description: "Implementation direction diverges from the original intent.",
+    severity: 1,
     examples: [
       "Building a full-stack framework for a simple API",
       "Using microservices architecture for a CLI tool",
@@ -4987,6 +5209,7 @@ var GAP_DEFINITIONS = {
     type: "missing_core",
     label: "Missing Core",
     description: "Core functionality from the request was not implemented.",
+    severity: 1,
     examples: [
       "Search feature not implemented in a search task",
       "Error handling omitted from API endpoint",
@@ -4997,6 +5220,7 @@ var GAP_DEFINITIONS = {
     type: "over_engineering",
     label: "Over-Engineering",
     description: "Excessive abstraction or generalization beyond what the task needs.",
+    severity: 0.3,
     examples: [
       "DI container for simple CRUD operations",
       "Abstract factory pattern for a single implementation",
@@ -5145,12 +5369,24 @@ function validateReviewResult(parsed, taskId) {
       retryReviewer: true
     };
   }
-  const derivedResult = gaps.length > 0 ? "fail" : "pass";
+  const hardGaps = gaps.filter((gap) => {
+    const def = GAP_DEFINITIONS[gap.type];
+    return def ? def.severity >= GAP_MIN_SEVERITY_THRESHOLD : true;
+  });
+  const softGaps = gaps.filter((gap) => {
+    const def = GAP_DEFINITIONS[gap.type];
+    return def ? def.severity < GAP_MIN_SEVERITY_THRESHOLD : false;
+  });
+  if (softGaps.length > 0) {
+    console.log(`[reviewer] Soft-filtered ${softGaps.length} gap(s) below severity threshold: ${softGaps.map((g) => g.type).join(", ")}`);
+  }
+  const derivedResult = hardGaps.length > 0 ? "fail" : "pass";
   return {
     taskId: parsed.taskId ?? taskId,
     result: derivedResult,
     gaps,
-    rerunNeeded: gaps.length > 0,
+    // Report ALL gaps (hard + soft) for transparency
+    rerunNeeded: hardGaps.length > 0,
     retryReviewer: false
   };
 }
@@ -5333,6 +5569,42 @@ function formatEscalation(plan, state, task) {
   return lines.join("\n");
 }
 
+// src/reviewer-runner.ts
+var import_child_process2 = require("child_process");
+var import_fs5 = require("fs");
+var import_os4 = require("os");
+var import_path5 = require("path");
+
+// node_modules/nanoid/index.js
+var import_crypto2 = __toESM(require("crypto"), 1);
+
+// node_modules/nanoid/url-alphabet/index.js
+var urlAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
+
+// node_modules/nanoid/index.js
+var POOL_SIZE_MULTIPLIER = 128;
+var pool;
+var poolOffset;
+var fillPool = (bytes) => {
+  if (!pool || pool.length < bytes) {
+    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
+    import_crypto2.default.randomFillSync(pool);
+    poolOffset = 0;
+  } else if (poolOffset + bytes > pool.length) {
+    import_crypto2.default.randomFillSync(pool);
+    poolOffset = 0;
+  }
+  poolOffset += bytes;
+};
+var nanoid = (size = 21) => {
+  fillPool(size |= 0);
+  let id = "";
+  for (let i = poolOffset - size; i < poolOffset; i++) {
+    id += urlAlphabet[pool[i] & 63];
+  }
+  return id;
+};
+
 // src/model-resolution.ts
 var import_fs4 = require("fs");
 var import_os3 = require("os");
@@ -5450,42 +5722,6 @@ function resolveModelAlias(model) {
 }
 
 // src/reviewer-runner.ts
-var import_child_process2 = require("child_process");
-var import_fs5 = require("fs");
-var import_os4 = require("os");
-var import_path5 = require("path");
-
-// node_modules/nanoid/index.js
-var import_crypto2 = __toESM(require("crypto"), 1);
-
-// node_modules/nanoid/url-alphabet/index.js
-var urlAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
-
-// node_modules/nanoid/index.js
-var POOL_SIZE_MULTIPLIER = 128;
-var pool;
-var poolOffset;
-var fillPool = (bytes) => {
-  if (!pool || pool.length < bytes) {
-    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
-    import_crypto2.default.randomFillSync(pool);
-    poolOffset = 0;
-  } else if (poolOffset + bytes > pool.length) {
-    import_crypto2.default.randomFillSync(pool);
-    poolOffset = 0;
-  }
-  poolOffset += bytes;
-};
-var nanoid = (size = 21) => {
-  fillPool(size |= 0);
-  let id = "";
-  for (let i = poolOffset - size; i < poolOffset; i++) {
-    id += urlAlphabet[pool[i] & 63];
-  }
-  return id;
-};
-
-// src/reviewer-runner.ts
 function normalizeCodexReasoningEffort(level) {
   const normalized = level?.trim().toLowerCase();
   switch (normalized) {
@@ -5544,11 +5780,10 @@ function normalizeCodexModel(model) {
   return trimmed;
 }
 function buildCodexReviewerCommand(options) {
-  const args = [
-    "exec",
-    "-",
+  const isResume = !!options.resumeSessionId;
+  const args = isResume ? ["exec", "resume", options.resumeSessionId, "-"] : ["exec", "-"];
+  args.push(
     "--skip-git-repo-check",
-    "--ephemeral",
     "--sandbox",
     "read-only",
     "--color",
@@ -5557,7 +5792,7 @@ function buildCodexReviewerCommand(options) {
     options.outputFile,
     "-C",
     options.workdir
-  ];
+  );
   if (options.model) {
     args.push("-m", options.model);
   }
@@ -5565,14 +5800,15 @@ function buildCodexReviewerCommand(options) {
   if (reasoningEffort) {
     args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
   }
+  const prompt = isResume ? options.prompt : [REVIEWER_SYSTEM_PROMPT, "", options.prompt].join("\n");
   return {
     command: "codex",
     args,
-    prompt: [REVIEWER_SYSTEM_PROMPT, "", options.prompt].join("\n")
+    prompt
   };
 }
 async function runReviewerWithCodexCli(options) {
-  const sessionId = `codex-review-${nanoid(8)}`;
+  const sessionId = options.resumeSessionId ?? `codex-review-${nanoid(8)}`;
   const tempDir = (0, import_fs5.mkdtempSync)((0, import_path5.join)((0, import_os4.tmpdir)(), "openclaw-harness-review-"));
   const outputFile = (0, import_path5.join)(tempDir, "last-message.txt");
   const normalizedModel = normalizeCodexModel(options.model);
@@ -5581,12 +5817,13 @@ async function runReviewerWithCodexCli(options) {
     outputFile,
     model: normalizedModel,
     prompt: options.prompt,
-    reasoningEffort: options.reasoningEffort
+    reasoningEffort: options.reasoningEffort,
+    resumeSessionId: options.resumeSessionId
   });
   try {
-    const output = await runCommand(command, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options.workdir, outputFile);
+    const { output, codexSessionId } = await runCommand(command, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options.workdir, outputFile);
     return {
-      sessionId,
+      sessionId: codexSessionId ?? sessionId,
       output,
       model: normalizedModel
     };
@@ -5618,7 +5855,8 @@ async function runCommand(command, timeoutMs, workdir, outputFile) {
         reject(err);
         return;
       }
-      resolve6(output ?? "");
+      const sessionMatch = stderr.match(/session id:\s*([0-9a-f-]{36})/i);
+      resolve6({ output: output ?? "", codexSessionId: sessionMatch?.[1] });
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -5666,6 +5904,236 @@ function readCodexOutput(outputFile, stdout) {
     if (saved) return saved;
   }
   return stdout.trim();
+}
+
+// src/reviewer-openrouter.ts
+var DEFAULT_TIMEOUT_MS2 = 12e4;
+async function runReviewerWithOpenRouter(options) {
+  const apiKey = pluginConfig.openRouterApiKey;
+  if (!apiKey) {
+    throw new Error("openRouterApiKey not configured in harness plugin config");
+  }
+  const model = options.model ?? pluginConfig.consensusReviewerModel ?? "deepseek/deepseek-v3.2";
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS2;
+  const body = JSON.stringify({
+    model,
+    messages: [
+      { role: "system", content: REVIEWER_SYSTEM_PROMPT },
+      { role: "user", content: options.prompt }
+    ],
+    max_tokens: 2e3,
+    temperature: 0
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://openclaw.ai",
+        "X-Title": "OpenClaw Harness Reviewer"
+      },
+      body,
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`OpenRouter API ${res.status}: ${errText.slice(0, 300)}`);
+    }
+    const data = await res.json();
+    const output = data?.choices?.[0]?.message?.content ?? "";
+    return { output, model };
+  } catch (err) {
+    if (err.name === "AbortError") {
+      return { output: "", model, error: `OpenRouter timeout after ${timeoutMs}ms` };
+    }
+    return { output: "", model, error: err?.message ?? String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// src/reviewer-consensus.ts
+async function runReviewerConsensus(options) {
+  const reviewModel = pluginConfig.reviewModel ?? "codex";
+  const secondaryModel = pluginConfig.consensusReviewerModel;
+  const reasoningEffort = pluginConfig.reviewerReasoningEffort;
+  const prompt = buildReviewRequest(
+    options.task,
+    options.workerResult,
+    options.originalRequest,
+    options.reviewLoopState
+  );
+  const primaryPromise = runReviewerWithCodexCli({
+    prompt,
+    workdir: options.workdir,
+    model: reviewModel,
+    reasoningEffort,
+    resumeSessionId: options.resumeSessionId
+  }).then((run) => ({
+    output: run.output,
+    sessionId: run.sessionId,
+    error: null
+  })).catch((err) => ({
+    output: "",
+    sessionId: "",
+    error: err?.message ?? String(err)
+  }));
+  const hasOpenRouter = !!pluginConfig.openRouterApiKey;
+  let secondaryPromise = null;
+  if (hasOpenRouter && secondaryModel) {
+    secondaryPromise = runReviewerWithOpenRouter({
+      prompt,
+      model: secondaryModel
+    }).then((run) => ({
+      output: run.output,
+      sessionId: `openrouter-${run.model}`,
+      error: run.error ?? null
+    })).catch((err) => ({
+      output: "",
+      sessionId: "",
+      error: err?.message ?? String(err)
+    }));
+  }
+  const [primaryRaw, secondaryRaw] = await Promise.all([
+    primaryPromise,
+    secondaryPromise ?? Promise.resolve(null)
+  ]);
+  const primaryResult = primaryRaw.error ? null : parseReviewOutput(primaryRaw.output, options.task.id);
+  const secondaryResult = secondaryRaw && !secondaryRaw.error ? parseReviewOutput(secondaryRaw.output, options.task.id) : null;
+  if (primaryResult && secondaryResult) {
+    const bothPass = primaryResult.result === "pass" && secondaryResult.result === "pass";
+    const bothFail = primaryResult.result === "fail" && secondaryResult.result === "fail";
+    if (bothPass) {
+      console.log(`[consensus] Both reviewers pass for ${options.task.id}`);
+      return { primary: primaryResult, secondary: secondaryResult, consensus: primaryResult, mode: "both" };
+    }
+    if (bothFail) {
+      const mergedGaps = [...primaryResult.gaps];
+      for (const gap of secondaryResult.gaps) {
+        if (!mergedGaps.some((g) => g.type === gap.type && g.evidence === gap.evidence)) {
+          mergedGaps.push(gap);
+        }
+      }
+      const merged = {
+        ...primaryResult,
+        gaps: mergedGaps
+      };
+      console.log(`[consensus] Both reviewers fail for ${options.task.id}: ${mergedGaps.length} merged gaps`);
+      return { primary: primaryResult, secondary: secondaryResult, consensus: merged, mode: "both" };
+    }
+    const failResult = primaryResult.result === "fail" ? primaryResult : secondaryResult;
+    console.log(`[consensus] Reviewer disagreement for ${options.task.id}: primary=${primaryResult.result}, secondary=${secondaryResult.result} \u2192 using fail`);
+    return { primary: primaryResult, secondary: secondaryResult, consensus: failResult, mode: "both" };
+  }
+  if (primaryResult) {
+    if (secondaryRaw?.error) {
+      console.warn(`[consensus] Secondary reviewer failed: ${secondaryRaw.error}`);
+    }
+    return { primary: primaryResult, secondary: null, consensus: primaryResult, mode: "primary-only" };
+  }
+  if (secondaryResult) {
+    console.warn(`[consensus] Primary reviewer failed: ${primaryRaw.error}`);
+    return { primary: secondaryResult, secondary: null, consensus: secondaryResult, mode: "secondary-only" };
+  }
+  console.error(`[consensus] Both reviewers failed: primary=${primaryRaw.error}, secondary=${secondaryRaw?.error}`);
+  const fallback = {
+    taskId: options.task.id,
+    result: "fail",
+    gaps: [],
+    rerunNeeded: true,
+    retryReviewer: true
+  };
+  return { primary: fallback, secondary: null, consensus: fallback, mode: "primary-only" };
+}
+
+// src/meta-reviewer.ts
+async function runMetaReview(options) {
+  const metaModel = pluginConfig.reviewModel ?? "codex";
+  const reasoningEffort = pluginConfig.reviewerReasoningEffort;
+  const prompt = buildMetaReviewPrompt(options);
+  try {
+    const run = await runReviewerWithCodexCli({
+      prompt,
+      workdir: options.workdir,
+      model: metaModel,
+      reasoningEffort,
+      timeoutMs: 12e4
+    });
+    return parseMetaReviewOutput(run.output);
+  } catch (err) {
+    console.warn(`[meta-reviewer] Failed: ${err?.message ?? String(err)} \u2014 defaulting to reject`);
+    return {
+      verdict: "reject",
+      reasoning: `Meta-review failed: ${err?.message ?? String(err)}`
+    };
+  }
+}
+function buildMetaReviewPrompt(options) {
+  const { task, plan, reviewLoopState } = options;
+  const reviewHistory = reviewLoopState.history.map((review, i) => {
+    const gapSummary = review.gaps.length > 0 ? review.gaps.map((g) => `  - ${g.type}: ${g.evidence}`).join("\n") : "  (no gaps)";
+    return `Round ${i + 1}: ${review.result}
+${gapSummary}`;
+  }).join("\n\n");
+  return [
+    `You are a meta-reviewer mediating between a code worker and a reviewer that cannot agree.`,
+    `The review loop has been exhausted (${reviewLoopState.maxLoops} rounds).`,
+    ``,
+    `## Task`,
+    `**Title:** ${task.title}`,
+    `**Scope:** ${task.scope}`,
+    `**Original request:** ${plan.originalRequest.slice(0, 1e3)}`,
+    ``,
+    `## Acceptance Criteria`,
+    ...task.acceptanceCriteria.map((c) => `- ${c}`),
+    ``,
+    `## Review History`,
+    reviewHistory,
+    ``,
+    `## Your Decision`,
+    `Respond with EXACTLY one JSON object:`,
+    ``,
+    `{`,
+    `  "verdict": "approve" | "revise" | "reject",`,
+    `  "reasoning": "1-2 sentence explanation",`,
+    `  "consolidatedFixPrompt": "if verdict=revise, concrete fix instructions (200+ chars)"`,
+    `}`,
+    ``,
+    `Decision guide:`,
+    `- "approve": remaining gaps are false positives or acceptable trade-offs. Force pass.`,
+    `- "revise": there's a clear fix that hasn't been tried. Give one more chance with specific instructions.`,
+    `- "reject": genuinely stuck \u2014 escalate to human supervisor.`
+  ].join("\n");
+}
+function parseMetaReviewOutput(output) {
+  const jsonMatch = output.match(/\{[\s\S]*?\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const verdict = parsed.verdict === "approve" ? "approve" : parsed.verdict === "revise" ? "revise" : "reject";
+      return {
+        verdict,
+        reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning.slice(0, 500) : "meta-review parsed",
+        consolidatedFixPrompt: verdict === "revise" && typeof parsed.consolidatedFixPrompt === "string" ? parsed.consolidatedFixPrompt : void 0
+      };
+    } catch {
+    }
+  }
+  const lower = output.toLowerCase();
+  if (/\bapprove\b/.test(lower)) {
+    return { verdict: "approve", reasoning: "Heuristic: 'approve' keyword detected" };
+  }
+  if (/\brevise\b/.test(lower)) {
+    return {
+      verdict: "revise",
+      reasoning: "Heuristic: 'revise' keyword detected",
+      consolidatedFixPrompt: output.slice(0, 1e3)
+    };
+  }
+  return { verdict: "reject", reasoning: "Could not parse meta-review output" };
 }
 
 // src/workspace-isolation.ts
@@ -5757,8 +6225,12 @@ function configureSnapshotGitIdentity(repoRoot) {
   runGit(repoRoot, ["config", "user.name", "OpenClaw Harness"]);
   runGit(repoRoot, ["config", "user.email", "harness@openclaw.local"]);
 }
+var EXECUTION_WORKSPACE_ROOT = (0, import_path6.join)((0, import_os5.homedir)(), ".openclaw", "harness-execution-workspaces");
+function isolationStatePath(planId) {
+  return (0, import_path6.join)(EXECUTION_WORKSPACE_ROOT, "state", `${planId}.json`);
+}
 function writeIsolationState(repoRoot, planId, executionWorkdir, cleanupRoot) {
-  const statePath = (0, import_path6.join)(cleanupRoot, "execution-workspaces", `${planId}.json`);
+  const statePath = isolationStatePath(planId);
   (0, import_fs6.mkdirSync)((0, import_path6.dirname)(statePath), { recursive: true });
   (0, import_fs6.writeFileSync)(
     statePath,
@@ -5766,11 +6238,23 @@ function writeIsolationState(repoRoot, planId, executionWorkdir, cleanupRoot) {
       planId,
       repoRoot,
       executionWorkdir,
+      cleanupRoot,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     }, null, 2) + "\n",
     "utf8"
   );
   return statePath;
+}
+function readIsolationState(planId) {
+  const statePath = isolationStatePath(planId);
+  try {
+    if (!(0, import_fs6.existsSync)(statePath)) return null;
+    const parsed = JSON.parse((0, import_fs6.readFileSync)(statePath, "utf8"));
+    if (!parsed?.executionWorkdir || !parsed?.repoRoot) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 function prepareExecutionWorkspace(originalWorkdir, planId) {
   const resolvedWorkdir = (0, import_path6.resolve)(originalWorkdir);
@@ -5782,7 +6266,18 @@ function prepareExecutionWorkspace(originalWorkdir, planId) {
       isolated: false
     };
   }
-  const tempRoot = (0, import_fs6.mkdtempSync)((0, import_path6.join)((0, import_os5.tmpdir)(), "openclaw-harness-exec-"));
+  const existingState = readIsolationState(planId);
+  if (existingState && (0, import_path6.resolve)(existingState.repoRoot) === repoRoot && (0, import_fs6.existsSync)(existingState.executionWorkdir)) {
+    return {
+      originalWorkdir: resolvedWorkdir,
+      executionWorkdir: existingState.executionWorkdir,
+      isolated: true,
+      statePath: isolationStatePath(planId),
+      cleanupPath: existingState.cleanupRoot
+    };
+  }
+  (0, import_fs6.mkdirSync)(EXECUTION_WORKSPACE_ROOT, { recursive: true });
+  const tempRoot = (0, import_fs6.mkdtempSync)((0, import_path6.join)(EXECUTION_WORKSPACE_ROOT, `${planId}-`));
   const tempDir = (0, import_path6.join)(tempRoot, (0, import_path6.basename)(repoRoot));
   const repoHasHead = hasHeadCommit(repoRoot);
   runGit(process.cwd(), ["clone", "--quiet", repoRoot, tempDir]);
@@ -5912,9 +6407,25 @@ function makeHarnessExecuteTool(ctx) {
         return await executeReviewOnly(params.request, workdir, ctx);
       }
       const autoResumeCheckpoint = findRecoverableCheckpoint(params.request, workdir);
-      const route = classifyRequest(params.request);
-      const tier = params.tier_override ?? route.tier;
-      console.log(`[harness] Route: tier=${tier}, confidence=${route.confidence}, reason=${route.reason}`);
+      const route = await classifyRequest(params.request);
+      const routerTier = params.tier_override ?? route.tier;
+      console.log(`[harness] Route: tier=${routerTier}, confidence=${route.confidence}, reason=${route.reason}`);
+      if (routerTier >= 1 && isAnalysisOnlyRequest(params.request)) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `## Harness: Analysis Mode (read-only)`,
+              ``,
+              `Request detected as analysis/review \u2014 no file modifications.`,
+              `Execute this analysis directly without spawning a worker.`,
+              ``,
+              `**Request:** ${params.request}`,
+              `**Workdir:** ${workdir}`
+            ].join("\n")
+          }]
+        };
+      }
       const existingCheckpoint = autoResumeCheckpoint;
       if (existingCheckpoint) {
         console.log(`[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`);
@@ -5929,16 +6440,16 @@ function makeHarnessExecuteTool(ctx) {
           );
         }
         const preparedWorkspace2 = plan2.tier > 0 ? prepareExecutionWorkspace(workdir, plan2.id) : { originalWorkdir: workdir, executionWorkdir: workdir, isolated: false };
-        const taskResults2 = await executePlan(plan2, preparedWorkspace2.executionWorkdir, maxBudgetUsd, ctx, existingCheckpoint);
-        const materialized2 = plan2.tier > 0 ? materializeExecutionWorkspace(preparedWorkspace2) : null;
+        const taskResults = await executePlan(plan2, preparedWorkspace2.executionWorkdir, maxBudgetUsd, ctx, existingCheckpoint);
+        const materialized = plan2.tier > 0 ? materializeExecutionWorkspace(preparedWorkspace2) : null;
         return {
           content: [{
             type: "text",
-            text: formatFinalResult(plan2, route, taskResults2, mode, existingCheckpoint, runState, materialized2)
+            text: formatFinalResult(plan2, route, taskResults, mode, existingCheckpoint, runState, materialized)
           }]
         };
       }
-      if (tier === 0) {
+      if (routerTier === 0) {
         return {
           content: [{
             type: "text",
@@ -5955,16 +6466,45 @@ function makeHarnessExecuteTool(ctx) {
         };
       }
       const memoryContext = await loadPlanningMemory(workdir);
-      const plan = await createExecutionPlan(params.request, tier, memoryContext, workdir);
-      console.log(`[harness] Plan: id=${plan.id}, tasks=${plan.tasks.length}, mode=${plan.mode}`);
+      const plan = await createExecutionPlan(params.request, routerTier, memoryContext, workdir);
+      const effectiveTier = Math.min(routerTier, plan.tier);
+      if (effectiveTier !== plan.tier) {
+        console.log(`[harness] effectiveTier override: planner=${plan.tier} \u2192 effective=${effectiveTier} (router=${routerTier})`);
+        plan.tier = effectiveTier;
+      }
+      console.log(`[harness] Plan: id=${plan.id}, tasks=${plan.tasks.length}, mode=${plan.mode}, effectiveTier=${effectiveTier}`);
       const preparedWorkspace = prepareExecutionWorkspace(workdir, plan.id);
       const checkpoint = initCheckpoint(plan, workdir, preparedWorkspace.executionWorkdir);
-      const taskResults = await executePlan(plan, preparedWorkspace.executionWorkdir, maxBudgetUsd, ctx, checkpoint);
-      const materialized = materializeExecutionWorkspace(preparedWorkspace);
+      const notificationChannel = ctx.messageChannel;
+      void (async () => {
+        try {
+          const taskResults = await executePlan(plan, preparedWorkspace.executionWorkdir, maxBudgetUsd, ctx, checkpoint);
+          const materialized = materializeExecutionWorkspace(preparedWorkspace);
+          const finalText = formatFinalResult(plan, route, taskResults, mode, checkpoint, freshExecutionRunState(), materialized);
+          await sendHarnessNotification(notificationChannel, ctx, `\uC644\uB8CC \u2014 plan ${plan.id}
+
+${finalText}`);
+          console.log(`[harness] Background run complete: plan=${plan.id}, tasks=${taskResults.length}`);
+        } catch (err) {
+          const errorMsg = `\uD558\uB124\uC2A4 \uC2E4\uD328 \u2014 plan ${plan.id}: ${err?.message ?? String(err)}`;
+          await sendHarnessNotification(notificationChannel, ctx, errorMsg);
+          console.error(`[harness] Background run failed: plan=${plan.id}`, err);
+        }
+      })();
       return {
         content: [{
           type: "text",
-          text: formatFinalResult(plan, route, taskResults, mode, checkpoint, freshExecutionRunState(), materialized)
+          text: [
+            `## Harness: Started (async)`,
+            ``,
+            `**Plan:** ${plan.id}`,
+            `**Tasks:** ${plan.tasks.length} (${plan.mode})`,
+            `**Tier:** ${effectiveTier} | **Route:** ${route.confidence}`,
+            `**Workdir:** ${workdir}`,
+            ``,
+            `Worker is running in background. Results will be pushed to your channel when complete.`,
+            `Monitor: \`cat /tmp/harness/${plan.id}/checkpoint.json\``
+          ].join("\n")
         }]
       };
     }
@@ -6023,24 +6563,15 @@ async function executeReviewOnly(request, workdir, ctx) {
   let reviewResult = null;
   let reviewerRetryCount = 0;
   while (true) {
-    const basePrompt = buildReviewRequest(task, syntheticWorkerResult, request, reviewLoop);
-    const reviewPrompt = reviewerRetryCount === 0 ? basePrompt : [basePrompt, ``, `### Retry Instructions`, `Your previous response was malformed.`, `Return only the single JSON object required by the system prompt.`].join("\n");
-    let reviewOutput = "";
-    if (reviewerTarget.backend === "codex-cli") {
-      const codexRun = await runReviewerWithCodexCli({
-        prompt: reviewPrompt,
-        workdir,
-        model: reviewerTarget.launchModel,
-        reasoningEffort: reviewerReasoningEffort
-      });
-      reviewOutput = codexRun.output;
-    } else {
-      throw new Error(
-        `Direct-session reviewer fallback is disabled for review-only mode. Configure reviewModel to a Codex-backed target; current backend=${reviewerTarget.backend}.`
-      );
-    }
-    console.log(`[harness] Review-only reviewer done: retry=${reviewerRetryCount}, backend=${reviewerTarget.backend}`);
-    reviewResult = parseReviewOutput(reviewOutput, taskId);
+    const consensusResult = await runReviewerConsensus({
+      task,
+      workerResult: syntheticWorkerResult,
+      originalRequest: request,
+      reviewLoopState: reviewLoop,
+      workdir
+    });
+    console.log(`[harness] Review-only consensus done: mode=${consensusResult.mode}, result=${consensusResult.consensus.result}, retry=${reviewerRetryCount}`);
+    reviewResult = consensusResult.consensus;
     if (!reviewResult.retryReviewer) break;
     reviewerRetryCount++;
     if (reviewerRetryCount >= 3) {
@@ -6236,6 +6767,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
   const totalPhases = maxLoops === 0 ? 1 : 1 + 2 * maxLoops;
   const perPhaseBudget = remainingBudget / totalPhases;
   let workerSessionId = "";
+  const totalReviewLoops = (outerLoops) => outerLoops + (isRealtimeBackend ? getRealtimeImplementationReviewLoops(workerSessionId) : 0);
   try {
     resetCheckpointTaskForRetry(checkpoint, task.id);
     updateTaskStatus(checkpoint, task.id, "in-progress", workdir);
@@ -6315,39 +6847,28 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
     updateTaskStatus(checkpoint, task.id, "in-review", workdir, { workerResult });
     const reviewLoop = initReviewLoop(task.id);
     let currentWorkerResult = workerResult;
+    let reviewerCodexSessionId;
     while (!reviewLoop.passed && !reviewLoop.escalated) {
       let reviewResult = null;
       let reviewerRetryCount = 0;
       while (true) {
         const reviewBudget = Math.min(perPhaseBudget, remainingBudget);
         remainingBudget -= reviewBudget;
-        const baseReviewPrompt = buildReviewRequest(task, currentWorkerResult, plan.originalRequest, reviewLoop);
-        const reviewPrompt = reviewerRetryCount === 0 ? baseReviewPrompt : [
-          baseReviewPrompt,
-          ``,
-          `### Retry Instructions`,
-          `Your previous response was malformed.`,
-          `Return only the single JSON object required by the system prompt.`
-        ].join("\n");
-        let reviewOutput = "";
-        if (reviewerTarget.backend === "codex-cli") {
-          const codexRun = await runReviewerWithCodexCli({
-            prompt: reviewPrompt,
-            workdir,
-            model: reviewerTarget.launchModel,
-            reasoningEffort: reviewerReasoningEffort
-          });
-          recordSession(checkpoint, task.id, "reviewer", codexRun.sessionId, workdir);
-          reviewOutput = codexRun.output;
-        } else {
-          throw new Error(
-            `Direct-session reviewer fallback is disabled for harness_execute. Configure reviewModel to a Codex-backed target; current backend=${reviewerTarget.backend}.`
-          );
+        const consensusResult = await runReviewerConsensus({
+          task,
+          workerResult: currentWorkerResult,
+          originalRequest: plan.originalRequest,
+          reviewLoopState: reviewLoop,
+          workdir,
+          resumeSessionId: reviewerCodexSessionId
+        });
+        if (!reviewerCodexSessionId && consensusResult.primary.taskId) {
         }
+        recordSession(checkpoint, task.id, "reviewer", `consensus-${consensusResult.mode}`, workdir);
         console.log(
-          `[harness] Reviewer done: task=${task.id}, loop=${reviewLoop.history.length + 1}, model=${reviewModel}, retry=${reviewerRetryCount}, backend=${reviewerTarget.backend}`
+          `[harness] Reviewer consensus done: task=${task.id}, loop=${reviewLoop.history.length + 1}, mode=${consensusResult.mode}, result=${consensusResult.consensus.result}`
         );
-        reviewResult = parseReviewOutput(reviewOutput, task.id);
+        reviewResult = consensusResult.consensus;
         if (!reviewResult.retryReviewer) {
           break;
         }
@@ -6355,14 +6876,14 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
         if (reviewerRetryCount >= 3) {
           updateTaskStatus(checkpoint, task.id, "failed", workdir, {
             reviewPassed: false,
-            reviewLoop: reviewLoop.currentLoop
+            reviewLoop: totalReviewLoops(reviewLoop.history.length)
           });
           return {
             taskId: task.id,
             workerSessionId,
             workerResult: currentWorkerResult,
             reviewPassed: false,
-            reviewLoops: reviewLoop.history.length,
+            reviewLoops: totalReviewLoops(reviewLoop.history.length),
             escalated: true,
             error: "Reviewer output could not be parsed after 3 attempts"
           };
@@ -6394,7 +6915,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
           if (finalizeResult.status !== "done") {
             updateTaskStatus(checkpoint, task.id, "failed", workdir, {
               reviewPassed: false,
-              reviewLoop: reviewLoop.currentLoop,
+              reviewLoop: totalReviewLoops(reviewLoop.history.length),
               reviewResult,
               workerResult: currentWorkerResult
             });
@@ -6404,7 +6925,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
               workerSessionId,
               workerResult: currentWorkerResult,
               reviewPassed: false,
-              reviewLoops: reviewLoop.history.length,
+              reviewLoops: totalReviewLoops(reviewLoop.history.length),
               escalated: true,
               error: isRealtimeBackend ? formatRealtimeFailureForCaller(ctx, workdir, finalizeError) : finalizeError
             };
@@ -6412,7 +6933,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
         }
         updateTaskStatus(checkpoint, task.id, "completed", workdir, {
           reviewPassed: true,
-          reviewLoop: reviewLoop.currentLoop,
+          reviewLoop: totalReviewLoops(reviewLoop.history.length),
           reviewResult,
           workerResult: currentWorkerResult
         });
@@ -6421,14 +6942,59 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
           workerSessionId,
           workerResult: currentWorkerResult,
           reviewPassed: true,
-          reviewLoops: reviewLoop.history.length,
+          reviewLoops: totalReviewLoops(reviewLoop.history.length),
           escalated: false
         };
       }
       if (action.action === "escalate") {
+        console.log(`[harness] Fix loop exhausted for task=${task.id}, running meta-reviewer...`);
+        const metaResult = await runMetaReview({ task, plan, reviewLoopState: reviewLoop, workdir });
+        console.log(`[harness] Meta-reviewer verdict: ${metaResult.verdict} \u2014 ${metaResult.reasoning}`);
+        if (metaResult.verdict === "approve") {
+          updateTaskStatus(checkpoint, task.id, "completed", workdir, {
+            reviewPassed: true,
+            reviewLoop: totalReviewLoops(reviewLoop.history.length),
+            reviewResult,
+            workerResult: currentWorkerResult
+          });
+          return {
+            taskId: task.id,
+            workerSessionId,
+            workerResult: currentWorkerResult,
+            reviewPassed: true,
+            reviewLoops: totalReviewLoops(reviewLoop.history.length),
+            escalated: false
+          };
+        }
+        if (metaResult.verdict === "revise" && metaResult.consolidatedFixPrompt) {
+          console.log(`[harness] Meta-reviewer grants bonus fix round for task=${task.id}`);
+          if (useBackendDispatch && backend) {
+            const backendCtx = {
+              task,
+              plan,
+              workdir,
+              ctx,
+              workerModel,
+              workerEffort,
+              jobId: workerSessionId
+            };
+            const bonusResult = await backend.continueWorker(backendCtx, metaResult.consolidatedFixPrompt);
+            if (bonusResult.workerResult) {
+              currentWorkerResult = bonusResult.workerResult;
+              updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
+                reviewPassed: false,
+                reviewLoop: totalReviewLoops(reviewLoop.history.length),
+                reviewResult,
+                workerResult: currentWorkerResult
+              });
+              reviewLoop.escalated = false;
+              continue;
+            }
+          }
+        }
         updateTaskStatus(checkpoint, task.id, "failed", workdir, {
           reviewPassed: false,
-          reviewLoop: reviewLoop.currentLoop,
+          reviewLoop: totalReviewLoops(reviewLoop.history.length),
           reviewResult
         });
         return {
@@ -6436,7 +7002,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
           workerSessionId,
           workerResult: currentWorkerResult,
           reviewPassed: false,
-          reviewLoops: reviewLoop.history.length,
+          reviewLoops: totalReviewLoops(reviewLoop.history.length),
           escalated: true,
           escalationReason: formatEscalation(plan, reviewLoop, task)
         };
@@ -6456,7 +7022,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
           if (!isRealtimeReviewReadyStatus(followUpResult.status) || !followUpResult.workerResult) {
             updateTaskStatus(checkpoint, task.id, "failed", workdir, {
               reviewPassed: false,
-              reviewLoop: reviewLoop.currentLoop,
+              reviewLoop: totalReviewLoops(reviewLoop.history.length),
               reviewResult,
               workerResult: followUpResult.workerResult ?? currentWorkerResult
             });
@@ -6466,7 +7032,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
               workerSessionId,
               workerResult: followUpResult.workerResult ?? currentWorkerResult,
               reviewPassed: false,
-              reviewLoops: reviewLoop.history.length,
+              reviewLoops: totalReviewLoops(reviewLoop.history.length),
               escalated: true,
               escalationReason: formatEscalation(plan, reviewLoop, task),
               error: isRealtimeBackend ? formatRealtimeFailureForCaller(ctx, workdir, followUpError) : followUpError
@@ -6475,7 +7041,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
           currentWorkerResult = followUpResult.workerResult;
           updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
             reviewPassed: false,
-            reviewLoop: reviewLoop.currentLoop,
+            reviewLoop: totalReviewLoops(reviewLoop.history.length),
             reviewResult,
             workerResult: currentWorkerResult
           });
@@ -6506,7 +7072,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
       workerSessionId,
       workerResult: currentWorkerResult,
       reviewPassed: false,
-      reviewLoops: reviewLoop.history.length,
+      reviewLoops: totalReviewLoops(reviewLoop.history.length),
       escalated: true,
       error: "Review loop exited unexpectedly"
     };
@@ -6668,8 +7234,12 @@ ${output}` : ""}`);
     `[harness] Tier 2 sync pull complete: workdir=${workdir}, remote=${REALTIME_REMOTE_HOST}${output ? `, output=${output}` : ""}`
   );
 }
-function realtimeCheckpointReviewModeForStatus(status, _goal) {
+function realtimeCheckpointReviewModeForStatus(status, stateDir, _goal) {
   if (status === "plan_waiting") {
+    const currentRound = detectLatestRealtimeRound(stateDir);
+    if (hasImplementationReviewArtifactForRound(stateDir, currentRound)) {
+      return null;
+    }
     return "embedded-plan";
   }
   return null;
@@ -6681,12 +7251,30 @@ async function waitForRealtimeTerminalState(stateDir, jobId, task, plan, ctx, wo
   const startedAt = Date.now();
   let lastStatus = readRealtimeStatus(stateDir) ?? "launching";
   const reviewedCheckpoints = /* @__PURE__ */ new Set();
+  let lastHeartbeatAt = startedAt;
+  const HEARTBEAT_INTERVAL_MS = 3e4;
+  const HEARTBEAT_INITIAL_MS = 2e4;
+  const notifyChannel = ctx.messageChannel;
   while (Date.now() - startedAt < REALTIME_MAX_WAIT_MS) {
     const currentStatus = readRealtimeStatus(stateDir);
     if (currentStatus) {
       lastStatus = currentStatus;
     }
-    const reviewMode = realtimeCheckpointReviewModeForStatus(lastStatus, goal);
+    const elapsed = Date.now() - startedAt;
+    const timeSinceLastHbeat = Date.now() - lastHeartbeatAt;
+    const heartbeatDue = elapsed < HEARTBEAT_INITIAL_MS + 5e3 ? timeSinceLastHbeat >= HEARTBEAT_INITIAL_MS : timeSinceLastHbeat >= HEARTBEAT_INTERVAL_MS;
+    if (heartbeatDue && notifyChannel && notifyChannel !== "unknown") {
+      const round = detectLatestRealtimeRound(stateDir);
+      const elapsedSec = Math.round(elapsed / 1e3);
+      sendHarnessNotification(
+        notifyChannel,
+        ctx,
+        `\u23F3 ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`
+      ).catch(() => {
+      });
+      lastHeartbeatAt = Date.now();
+    }
+    const reviewMode = realtimeCheckpointReviewModeForStatus(lastStatus, stateDir, goal);
     if (reviewMode) {
       const currentRound = detectLatestRealtimeRound(stateDir);
       const reviewKey = `${reviewMode}:${currentRound}`;
@@ -7002,6 +7590,48 @@ function isRealtimeTerminalStatus(status) {
   if (!status) return false;
   return status === "done" || status === "aborted" || status === "plan_violation" || status === "loop" || status === "error" || status.startsWith("error:");
 }
+function extractArtifactRound(filename) {
+  const match = filename.match(/-(\d+)\.[^.]+(?:\.[^.]+)?$/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+function listRealtimeArtifacts(stateDir, pattern) {
+  try {
+    if (!(0, import_fs7.existsSync)(stateDir)) return [];
+    return (0, import_fs7.readdirSync)(stateDir).filter((name) => pattern.test(name)).map((name) => ({ round: extractArtifactRound(name), path: (0, import_path7.join)(stateDir, name) })).sort((a, b) => a.round - b.round);
+  } catch {
+    return [];
+  }
+}
+function parseReviewVerdictFromSource(path) {
+  const text = readTextFileIfExists(path);
+  if (!text) return null;
+  const match = text.match(/^verdict=(.+)$/m);
+  return match?.[1]?.trim() || null;
+}
+function hasImplementationReviewArtifactForRound(stateDir, round) {
+  if (round <= 0) return false;
+  return (0, import_fs7.existsSync)((0, import_path7.join)(stateDir, `implementation-review-round-${round}.source.txt`));
+}
+function collectRealtimeReviewDiagnostics(stateDir) {
+  const implementationSources = listRealtimeArtifacts(stateDir, /^implementation-review-round-\d+\.source\.txt$/);
+  const implementationVerdicts = implementationSources.map(({ round, path }) => {
+    const verdict = parseReviewVerdictFromSource(path);
+    return verdict ? `r${round}=${verdict}` : null;
+  }).filter((value) => Boolean(value));
+  const planSources = listRealtimeArtifacts(stateDir, /^plan-review-round-\d+\.source\.txt$/);
+  const planErrors = listRealtimeArtifacts(stateDir, /^plan-review-round-\d+\.error\.txt$/);
+  const lastPlanReviewError = planErrors.length > 0 ? readTextFileIfExists(planErrors[planErrors.length - 1].path) ?? void 0 : void 0;
+  return {
+    implementationRounds: implementationSources.length,
+    implementationVerdicts,
+    planReviewRounds: planSources.length,
+    lastPlanReviewError
+  };
+}
+function getRealtimeImplementationReviewLoops(jobId) {
+  if (!jobId) return 0;
+  return collectRealtimeReviewDiagnostics((0, import_path7.join)(REALTIME_STATE_ROOT, jobId)).implementationRounds;
+}
 function isLikelyRealtimePlanSummary(result) {
   const text = result?.resultText?.trim() ?? "";
   if (!text) return false;
@@ -7035,6 +7665,7 @@ function parseRealtimeStateDir(output, jobId) {
 }
 function buildRealtimeSummary(stateDir, status, extraDetail) {
   const latestResult = readLatestRealtimeResult(stateDir);
+  const reviewDiagnostics = collectRealtimeReviewDiagnostics(stateDir);
   const verifyReport = readTextFileIfExists((0, import_path7.join)(stateDir, "verify-report.txt"));
   const outputLog = readTextFileIfExists((0, import_path7.join)(stateDir, "output.log"));
   const sections = [`claude-realtime job ${(0, import_path7.basename)(stateDir)} status=${status}`];
@@ -7044,9 +7675,21 @@ function buildRealtimeSummary(stateDir, status, extraDetail) {
       latestResult.costUsd != null ? `cost=$${latestResult.costUsd.toFixed(2)}` : ""
     ].filter(Boolean).join(", ");
     sections.push([
-      `Latest Claude result${metadata ? ` (${metadata})` : ""}:`,
+      `Latest worker result (Claude Code)${metadata ? ` (${metadata})` : ""}:`,
       tailText(latestResult.resultText, 16, 1600)
     ].join("\n"));
+  }
+  if (reviewDiagnostics.implementationRounds > 0) {
+    sections.push(
+      `Implementation reviews: ${reviewDiagnostics.implementationRounds}` + (reviewDiagnostics.implementationVerdicts.length > 0 ? ` (${reviewDiagnostics.implementationVerdicts.join(", ")})` : "")
+    );
+  }
+  if (reviewDiagnostics.planReviewRounds > 0) {
+    sections.push(`Embedded plan reviews: ${reviewDiagnostics.planReviewRounds}`);
+  }
+  if (reviewDiagnostics.lastPlanReviewError) {
+    sections.push(`Last embedded plan-review error:
+${tailText(reviewDiagnostics.lastPlanReviewError, 8, 1200)}`);
   }
   if (verifyReport) {
     sections.push(`Verify report:
@@ -7306,7 +7949,9 @@ function resolveEmbeddedReviewerProviderAndModel(reviewModel, fallbackModel) {
   });
 }
 function buildHarnessSubagentSessionKey(agentId, planId, taskId, role) {
-  return role === "reviewer" ? `agent:${agentId}:subagent:harness-${planId}-${taskId}-review` : `agent:${agentId}:subagent:harness-${planId}-${taskId}`;
+  const composite = `${planId}|${taskId}|${role}`;
+  const hash = (0, import_crypto3.createHash)("sha256").update(composite).digest("hex").slice(0, 12);
+  return `h${hash}`;
 }
 async function waitForSessionEnd(sessionId) {
   const activeSessionManager = requireHarnessSessionManager();
@@ -7350,6 +7995,39 @@ async function waitForCompletion(sessionId, taskId) {
 }
 function sleep(ms) {
   return new Promise((resolve6) => setTimeout(resolve6, ms));
+}
+async function sendHarnessNotification(channel, ctx, message) {
+  try {
+    const { execFile: execFileCb } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFileCb);
+    const target = channel || pluginConfig.fallbackChannel;
+    if (!target || target === "unknown") {
+      console.warn(`[harness] No notification channel available, logging result only`);
+      return;
+    }
+    const parts = target.split("|");
+    const args = ["message", "send", "--message", message.slice(0, 4e3)];
+    if (parts.length >= 2) {
+      args.push("--channel", parts[0]);
+    }
+    if (parts.length >= 3) {
+      args.push("--reply-account", parts[1], "--reply-to", parts[2]);
+    } else if (parts.length === 2) {
+      args.push("--reply-to", parts[1]);
+    }
+    await execFileAsync("openclaw", args, { timeout: 15e3 });
+  } catch (err) {
+    console.warn(`[harness] Notification send failed: ${err?.message ?? String(err)}`);
+  }
+}
+var ANALYSIS_KEYWORDS_KO = /\b(분석|검토|조사|확인|현황|리뷰|점검|비교|상태|살펴|파악)\b/;
+var ANALYSIS_KEYWORDS_EN = /\b(analy[sz]e|review|inspect|audit|check|status|compare|investigate|examine|diagnose)\b/i;
+var CODING_SIGNALS = /\b(create|add|implement|fix|update|modify|write|build|refactor|delete|remove|생성|추가|구현|수정|작성|만들|고쳐|삭제|제거|리팩토링)\b/i;
+function isAnalysisOnlyRequest(request) {
+  const hasAnalysis = ANALYSIS_KEYWORDS_KO.test(request) || ANALYSIS_KEYWORDS_EN.test(request);
+  const hasCoding = CODING_SIGNALS.test(request);
+  return hasAnalysis && !hasCoding;
 }
 function extractFilePaths(output) {
   return extractRelevantFilePaths(output);
@@ -10090,45 +10768,26 @@ function register(api) {
   let sm = null;
   let nr = null;
   let cleanupInterval = null;
-  const logCtx = (toolName, ctx) => {
-    console.log(`[harness] registerTool factory: ${toolName}, agentId=${ctx?.agentId}, workspace=${ctx?.workspaceDir}`);
+  const toolCache = /* @__PURE__ */ new Map();
+  const cacheKey = (name, ctx) => `${name}:${ctx?.agentId ?? ""}:${ctx?.workspaceDir ?? ""}`;
+  const cachedFactory = (name, make) => (ctx) => {
+    const key = cacheKey(name, ctx);
+    const cached = toolCache.get(key);
+    if (cached) return cached;
+    console.log(`[harness] registerTool factory: ${name}, agentId=${ctx?.agentId}, workspace=${ctx?.workspaceDir}`);
+    const tool = make(ctx);
+    toolCache.set(key, tool);
+    return tool;
   };
-  api.registerTool((ctx) => {
-    logCtx("harness_launch", ctx);
-    return makeClaudeLaunchTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_sessions", ctx);
-    return makeClaudeSessionsTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_kill", ctx);
-    return makeClaudeKillTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_output", ctx);
-    return makeClaudeOutputTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_fg", ctx);
-    return makeClaudeFgTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_bg", ctx);
-    return makeClaudeBgTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_respond", ctx);
-    return makeClaudeRespondTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_stats", ctx);
-    return makeClaudeStatsTool(ctx);
-  }, { optional: false });
-  api.registerTool((ctx) => {
-    logCtx("harness_execute", ctx);
-    return makeHarnessExecuteTool(ctx);
-  }, { optional: false });
+  api.registerTool(cachedFactory("harness_launch", makeClaudeLaunchTool), { optional: false });
+  api.registerTool(cachedFactory("harness_sessions", makeClaudeSessionsTool), { optional: false });
+  api.registerTool(cachedFactory("harness_kill", makeClaudeKillTool), { optional: false });
+  api.registerTool(cachedFactory("harness_output", makeClaudeOutputTool), { optional: false });
+  api.registerTool(cachedFactory("harness_fg", makeClaudeFgTool), { optional: false });
+  api.registerTool(cachedFactory("harness_bg", makeClaudeBgTool), { optional: false });
+  api.registerTool(cachedFactory("harness_respond", makeClaudeRespondTool), { optional: false });
+  api.registerTool(cachedFactory("harness_stats", makeClaudeStatsTool), { optional: false });
+  api.registerTool(cachedFactory("harness_execute", makeHarnessExecuteTool), { optional: false });
   registerClaudeCommand(api);
   registerClaudeSessionsCommand(api);
   registerClaudeKillCommand(api);
@@ -10219,7 +10878,14 @@ function register(api) {
       setNotificationRouter(nr);
       sm.notificationRouter = nr;
       nr.startReminderCheck(() => sm?.list("running") ?? []);
-      cleanupInterval = setInterval(() => sm.cleanup(), 5 * 60 * 1e3);
+      cleanupInterval = setInterval(() => {
+        sm.cleanup();
+        try {
+          const { cleanupStaleCheckpoints: cleanupStaleCheckpoints2 } = (init_checkpoint(), __toCommonJS(checkpoint_exports));
+          cleanupStaleCheckpoints2();
+        } catch {
+        }
+      }, 5 * 60 * 1e3);
     },
     stop: () => {
       if (nr) nr.stop();

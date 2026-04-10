@@ -1,36 +1,51 @@
 # Notification System
 
-## Level 1 — Session Lifecycle (Always sent to Telegram)
-Sent by SessionManager via `openclaw message send` (fire-and-forget).
+> Last updated: 2026-04-10
 
-| Emoji | Event | When | Agent Reaction |
-|-------|-----------|---------------------|--------------------------------------|
-| ↩️    | Launched  | Session started     | No                                   |
-| 🔔    | Claude asks | Waiting for input | Yes - claude_respond                 |
-| ↩️    | Responded | Agent replied       | No                                   |
-| ✅    | Completed | Session finished    | Yes - claude_output + summarize      |
-| ❌    | Failed    | Session error       | No                                   |
-| ⛔    | Killed    | Session terminated  | No                                   |
+## Harness notifications (primary)
 
-## Level 2 — Foreground Streaming (Optional)
-Sent by NotificationRouter when claude_fg is active. Real-time tool calls, reasoning, read/write.
+### Heartbeat
+During async worker execution, progress is pushed directly to Telegram:
+- **20 seconds**: first heartbeat after worker launch
+- **30 seconds**: subsequent intervals
+- Format: `⏳ <jobId-tail> | <status> | round <N> | <elapsed>s`
+- Sent via `openclaw message send` CLI
 
-## Level 3 — Agent Behavior (Not plugin responsibility)
-The plugin is agent-agnostic. How agents react to 🔔 and ✅ is configured in their HEARTBEAT.md/AGENTS.md.
+### Completion push
+When the background pipeline finishes, the full result is pushed to Telegram:
+- On success: `완료 — plan <id>\n\n<formatted result>`
+- On failure: `하네스 실패 — plan <id>: <error>`
+- Max 4000 chars per message
 
-## Wake Mechanism
+### Channel resolution
+- Resolved from `ctx.messageChannel` (tool invocation context)
+- Fallback: `pluginConfig.fallbackChannel`
+- If channel is "unknown" or undefined, notifications are logged but not sent
 
-### Primary: Detached Spawn
-`spawn("openclaw", ["agent", "--agent", id, "--message", text, "--deliver", ...], { detached: true })` + `child.unref()`
-- Non-blocking, agent response routed to Telegram via --deliver
-- Used for 🔔 waiting and ✅ completed
+---
 
-### Fallback: System Event
-`openclaw system event --mode now`
-- Requires heartbeat to be configured
-- Known bug #14527: skipped if HEARTBEAT.md is empty
+## Legacy session notifications
 
-## Configuration
-Notifications route to Telegram via agentChannels config mapping workspace paths to channel strings.
+Applies to legacy direct-session tools (`harness_launch`, etc.) only.
 
-Read src/session-manager.ts for accurate details about the implementation.
+| Emoji | Event | When |
+|-------|-------|------|
+| ↩️ | Launched | Session started |
+| 🔔 | Claude asks | Waiting for input |
+| ✅ | Completed | Session finished |
+| ❌ | Failed | Session error |
+| ⛔ | Killed | Session terminated |
+
+---
+
+## agentChannels config
+
+Map workspace paths to notification targets:
+```json
+{
+  "agentChannels": {
+    "/Users/nova/.openclaw/workspace-nova": "telegram|default|819845604",
+    "/Users/nova/.openclaw/workspace-bolt": "telegram|bolt|819845604"
+  }
+}
+```

@@ -1,80 +1,67 @@
 # Tools Reference
 
-## Primary tool
+> Last updated: 2026-04-10
 
-### `harness_execute`
+## Primary tool: `harness_execute`
 
-`harness_execute` is the **primary coding tool**.
+### Behavior
 
-It runs the harness pipeline:
-1. deterministically classify request
-2. deterministically plan tasks
-3. dispatch worker
-4. review output
-5. run fix loop if needed
-6. return structured result
+**Async fire-and-forget** for tier 1+:
+- Returns plan_id in <3 seconds
+- Full pipeline runs in background
+- Results pushed to Telegram on completion
+- Heartbeat every 30s during execution
+
+**Sync** for tier 0, analysis mode, and review-only.
 
 ### Parameters
 
 | Parameter | Description |
 |-----------|-------------|
-| `request` | natural-language coding task |
-| `workdir` | repo / working directory |
-| `mode` | `ask` / `delegate` / `autonomous` |
-| `tier_override` | force tier `0`, `1`, or `2` |
-| `max_budget_usd` | budget cap |
-| `approved_plan_id` | resume from an approval-gated plan |
+| `request` | Natural-language coding task |
+| `workdir` | Repo / working directory |
+| `tier_override` | Force tier `0`, `1`, or `2` |
+| `max_budget_usd` | Budget cap (default: 5) |
+| `reviewOnly` | Skip planner/worker, review local changes only |
 
 ### Tier behavior
 
-| Tier | Meaning |
-|------|---------|
-| `0` | tiny/local-safe edits |
-| `1` | normal coding tasks |
-| `2` | complex/high-risk/multi-step coding |
+| Tier | Meaning | Mode |
+|------|---------|------|
+| `0` | Config/doc/patch | sync, caller agent direct |
+| `1` | Normal coding | async, worker + consensus review |
+| `2` | Complex / multi-step | async, planner decomposition + worker + consensus review |
 
-### Result shape
+### Analysis mode
 
-The returned result is structured. In practice you care about:
-- overall completion status
-- passed / failed task counts
-- review loop count
-- any remaining gaps or escalation notes
+Requests containing analysis keywords ("분석", "검토", "조사", "analyze", "review", "inspect") without coding verbs → auto-detected as read-only. Returns immediately without spawning a worker.
+
+### Review-only mode
+
+```
+harness_execute(request: "Review my changes", workdir: "/repo", reviewOnly: true)
+```
+Collects `git diff`, runs reviewer, returns gaps. No file modifications.
+
+### Return shape (async)
+
+```json
+{
+  "content": [{
+    "type": "text",
+    "text": "## Harness: Started (async)\n\n**Plan:** plan-YYYYMMDD-XXXXXX\n**Tasks:** N\n..."
+  }]
+}
+```
+
+Final result is pushed via Telegram (not returned in tool response).
 
 ---
 
 ## Legacy tools
 
-These tools still exist, but they are the **legacy surface**:
-- `harness_launch`
-- `harness_respond`
-- `harness_fg`
-- `harness_bg`
-- `harness_kill`
-- `harness_output`
-- `harness_sessions`
-- `harness_stats`
+Still available when `enableLegacyTools: true`:
+- `harness_launch`, `harness_respond`, `harness_fg`, `harness_bg`
+- `harness_kill`, `harness_output`, `harness_sessions`, `harness_stats`
 
-Use them only when you truly need raw direct-session control.
-For new automated coding work, prefer `harness_execute`.
-
----
-
-## When to use what
-
-| Need | Tool |
-|------|------|
-| automated coding task | `harness_execute` |
-| approval-gated rerun of same plan | `harness_execute(..., approved_plan_id=...)` |
-| raw PTY / direct Claude control | legacy tools |
-| old-session debugging | legacy tools |
-
----
-
-## Important behavior notes
-
-- tier 1: `claude-realtime.sh` worker + Codex CLI review
-- tier 2: same realtime worker path + embedded caller-agent plan review + Codex CLI review
-- fix loops for coding tasks continue through the realtime worker path
-- fix loops are automatic until pass or escalation
-- legacy launch safety rules are documented separately in `docs/safety.md`
+For new coding work, use `harness_execute`.

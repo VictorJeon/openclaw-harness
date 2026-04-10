@@ -1,5 +1,7 @@
 # Architecture
 
+> Last updated: 2026-04-10 (async fire-and-forget, consensus review, meta-reviewer, heartbeat)
+
 ## Overview
 
 OpenClaw Harness has two surfaces:
@@ -9,164 +11,120 @@ OpenClaw Harness has two surfaces:
 | `harness_execute` | **primary** | automated Plan → Work → Review execution |
 | `/harness*` + legacy tools | legacy | direct PTY session control |
 
-The project is now **harness-first**. New automated coding work should go through `harness_execute`.
-
 ---
 
 ## Primary path: `harness_execute`
 
-```txt
-request
-  → router
-  → planner
-  → worker dispatch
-  → reviewer
-  → fix / re-review loop
-  → structured result
 ```
+request
+  → router (3-layer: pattern → keyword → LLM)
+  → planner (Opus model-backed, heuristic fallback)
+  → effectiveTier = min(router, planner)
+  → analysis mode check (read-only requests skip worker)
+  → [ASYNC] worker dispatch (returns plan_id immediately)
+  → heartbeat (20s initial, 30s intervals via Telegram)
+  → reviewer consensus (Codex + GLM parallel)
+  → fix loop (max 10, same-session continuity)
+  → meta-reviewer (if fix loop exhausted: approve/revise/reject)
+  → result push (direct Telegram notification)
+```
+
+### Async fire-and-forget
+
+`harness_execute` returns immediately (~1-3s) with the plan_id. The full pipeline runs in background. Results are pushed to Telegram on completion. This unblocks the orchestrator (Nova) so it can handle other messages during long runs.
 
 ### Core stages
 
 1. **Router** (`src/router.ts`)
-   - deterministically classifies into tier 0 / 1 / 2
-   - simple single-feature workflows are biased toward fewer task splits
+   - 3-layer cascade: regex pattern → keyword scoring → LLM classification
+   - Layer 1 + 2 handle ~90% of requests at 0 tokens
+   - Layer 3 (LLM) fires only for ambiguous requests (~500 tokens, 15s timeout)
+   - Graceful degradation: if LLM unavailable, falls back to length heuristic
 
 2. **Planner** (`src/planner.ts`)
-   - deterministic task decomposition only
-   - no model call happens here
-   - collapses common “implement + test + README + verify + commit” requests into one task when appropriate
+   - Model-backed (Opus primary, Sonnet fallback, heuristic final fallback)
+   - effectiveTier = min(router.tier, planner.tier) — prevents over-classification
+   - Tier 1: single-task plan. Tier 2: multi-task decomposition (max 6 tasks)
 
 3. **Worker execution** (`src/tools/harness-execute.ts`)
-   - tier 0: caller agent direct
-   - tier 1: backend-selected coding worker (`remote-realtime` by default, optional `local-cc`)
-   - tier 2: the same backend selection, with tier-2 planning / decomposition semantics
+   - Tier 0: caller agent direct (sync). Tier 1+: backend-selected worker (async)
+   - Analysis mode: read-only requests auto-detected, skip worker
+   - Heartbeat: 20s initial, 30s intervals via direct Telegram push
 
-4. **Review loop** (`src/review-loop.ts` + `src/tools/harness-execute.ts`)
-   - reviewer checks worker output
-   - `pass` → complete
-   - `fix` → feed reviewer guidance back into the same task flow
-   - loop continues until pass or escalation
+4. **Reviewer consensus** (`src/reviewer-consensus.ts`)
+   - Primary: Codex CLI (gpt-5.4). Secondary: GLM 5.1 via OpenRouter (parallel)
+   - Both pass → pass. Both fail → merge gaps. Disagree → conservative fail
+   - If one reviewer fails → use the other (graceful degradation)
 
-5. **Checkpointing** (`src/checkpoint.ts`)
-   - per-run checkpoint on disk
-   - supports resume / recovery after interruption
+5. **Review loop** (`src/review-loop.ts`)
+   - Same-session continuity: `codex exec resume <id>`
+   - Per-gap severity: over_engineering(0.3) soft-filtered below threshold 0.5
+   - Max 10 fix-rereview cycles
+
+6. **Meta-reviewer** (`src/meta-reviewer.ts`)
+   - Fires when fix loop exhausted (before human escalation)
+   - approve → force pass. revise → bonus fix round. reject → escalate
+
+7. **Checkpointing** (`src/checkpoint.ts`)
+   - Per-run on disk (`/tmp/harness/<plan-id>/`)
+   - Stale cleanup: 30 min running / 1 hour terminal (auto GC every 5 min)
 
 ---
 
 ## Worker backends
 
-The harness supports a **one-repo / two-backend** structure:
+| Backend | Default | Worker | Sync |
+|---------|---------|--------|------|
+| `remote-realtime` | **yes** | `claude-realtime.sh` on Hetzner | git-sync.sh |
+| `local-cc` | opt-in | local `claude` CLI | direct filesystem |
 
-- `remote-realtime` = current default / stable lane
-- `local-cc` = opt-in local Claude Code CLI lane
-
-Shared dispatch behavior:
-- `workerBackend` selects the tier 1+ worker lane
-- tier 0 remains unchanged and never enters backend dispatch
-- reviewer stays on Codex CLI for both backends
-- default backend remains `remote-realtime`
-
-`remote-realtime` specifics:
-- launches `claude-realtime.sh` on Hetzner
-- syncs completed work back locally before review
-- keeps follow-up fixes in the same remote worker session
-
-`local-cc` specifics:
-- launches the local `claude` CLI directly in the local workdir
-- uses one-shot Claude CLI runs for initial work and fix rounds
-- persists state under `/tmp/openclaw-harness-local-cc/<jobId>` so repeated calls can reuse completed output
+---
 
 ## Tier model
 
-| Tier | Worker path | Review path |
-|------|-------------|-------------|
-| **0** | caller agent direct | none |
-| **1** | default: realtime Claude worker on Hetzner; opt-in: local Claude Code CLI | Codex CLI reviewer |
-| **2** | same backend split as Tier 1 | embedded caller-agent plan review + Codex CLI reviewer |
-
-### Tier 1 details
-
-- used for normal coding tasks
-- default worker runs through `claude-realtime.sh`
-- `workerBackend="local-cc"` runs one-shot local Claude CLI rounds in the local workdir
-- remote-realtime fix loops continue in the same realtime worker session
-- local-cc fix loops reuse persisted `jobId` state and rerun a fresh local Claude CLI round
-- reviewer runs through Codex CLI
-
-### Tier 2 details
-
-- used for complex/high-risk/multi-step coding tasks
-- worker runs through the configured tier-1 backend
-- plan review is produced by the **calling agent directly** through embedded runtime review
-- remote-realtime writes feedback back to the realtime worker state dir and syncs the repo before review
-- local-cc works directly in the local workdir and keeps its state entirely local
+| Tier | Worker | Review | Mode |
+|------|--------|--------|------|
+| **0** | caller agent | none | sync |
+| **1** | realtime/local-cc | consensus (Codex + GLM) | async |
+| **2** | same + plan review | embedded plan review + consensus | async |
+| **review-only** | none (git diff) | Codex CLI | sync |
+| **analysis** | none | none | sync read-only |
 
 ---
 
-## Tier 2 runtime flow
+## Cross-model matrix
 
-```txt
-harness_execute
-  → launch claude-realtime worker
-  → worker reaches plan_waiting
-  → embedded caller-agent review generates PROCEED / REVISE / DONE / ABORT
-  → feedback written into realtime state dir
-  → worker continues
-  → sync repo back locally
-  → Codex CLI review
-  → if fix needed, feed back into same realtime worker session
-  → final DONE
-```
-
-Key implementation points:
-- embedded realtime review replaced shell-based review harvesting for `plan_waiting`
-- implementation `waiting` checkpoints are handed to a durable realtime owner that runs Codex review, so Claude Code ↔ Codex ping-pong remains intact without hanging on a missing external `DONE`
-- sync-back happens before final review
-- bare repo/worktree env is injected for Hetzner worker repos
-- completed realtime workers can be recovered on resume
+| Role | Model | Provider | Session |
+|------|-------|----------|---------|
+| Worker | Opus 4.6 | Anthropic (Hetzner) | `--resume` |
+| Primary reviewer | gpt-5.4 | Codex CLI | `exec resume` |
+| Secondary reviewer | GLM 5.1 | OpenRouter | stateless |
+| Meta-reviewer | gpt-5.4 | Codex CLI | one-shot |
+| Planner | Opus 4.6 | SessionManager | one-shot |
+| LLM Router | plannerModel | SessionManager | one-shot |
 
 ---
 
-## Reviewer model
+## Gap taxonomy
 
-### Embedded checkpoint review
-- tier 2 only
-- generated by the **calling agent** via embedded runtime review
-- applies to plan checkpoints only
-- stored in realtime artifacts like `plan-review-round-*.source.txt`
-
-### Implementation waiting review
-- tier 2 only
-- owned by the durable realtime job, not the transient parent harness turn
-- uses **Codex CLI** during realtime `waiting`
-- stored in realtime artifacts like `implementation-review-round-*.source.txt`
-- emits `DONE`, follow-up fix instructions, or `ABORT`
-
-### Final / loop review
-- uses **Codex CLI**
-- review output is parsed into `pass` / `fix` / escalation
+| Type | Severity | Hard fail? |
+|------|----------|-----------|
+| `direction_drift` | 1.0 | yes |
+| `missing_core` | 1.0 | yes |
+| `assumption_injection` | 0.8 | yes |
+| `scope_creep` | 0.7 | yes |
+| `over_engineering` | 0.3 | **no** (soft) |
 
 ---
 
-## Legacy surface
+## Source files (priority)
 
-Legacy direct-session tools remain for:
-- interactive PTY sessions
-- debugging
-- older direct Claude workflows
+1. `src/tools/harness-execute.ts`
+2. `src/router.ts`
+3. `src/reviewer-consensus.ts`
+4. `src/meta-reviewer.ts`
+5. `src/planner.ts`
+6. `src/review-loop.ts`
+7. `src/checkpoint.ts`
 
-They are intentionally secondary. They do not define the current harness architecture.
-
-See `docs/safety.md` for legacy-only launch guards.
-
----
-
-## Source files that matter most
-
-- `src/tools/harness-execute.ts`
-- `src/router.ts`
-- `src/planner.ts`
-- `src/review-loop.ts`
-- `src/checkpoint.ts`
-
-If behavior is unclear, read those before trusting any summary doc.
+When docs and code disagree, code wins.

@@ -1,11 +1,13 @@
 # OpenClaw Harness v1 — Product Requirements Document
 
-> **Historical design document.** Large parts of this PRD describe the pre-realtime / ACP-first architecture and are no longer the source of truth. For the live architecture, read `docs/ARCHITECTURE.md` first.
+> **Historical design document.** This PRD describes the original v1 design intent. The live architecture has evolved significantly. For current state, read `docs/ARCHITECTURE.md`.
+>
+> **v1 → current delta (2026-04-10):** ACP→remote-realtime, 1-reviewer→dual-consensus (Codex+GLM), sync→async fire-and-forget, deterministic router→3-layer LLM router, no meta-review→meta-reviewer mediation, no heartbeat→30s Telegram heartbeat, 1 rerun→10 max loops with session continuity, no gap severity→per-gap severity filtering, no cleanup→auto stale plan GC.
 
 **작성일**: 2026-03-29  
 **작성자**: Sol (☀️)  
 **대상 독자**: Mason  
-**상태**: Draft v1.1 (Mason 피드백 반영: cross-model review, tier 0/1/2, 리뷰 루프 4회)
+**상태**: v1.1 (historical) — 현재 구현은 `docs/ARCHITECTURE.md` 참조
 
 ---
 
