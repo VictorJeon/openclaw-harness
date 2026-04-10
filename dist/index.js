@@ -7226,11 +7226,6 @@ async function runEmbeddedRealtimePlanReview(params) {
   } catch {
     agentDir = void 0;
   }
-  let reviewWorkspaceDir = params.ctx.workspaceDir || process.cwd();
-  try {
-    reviewWorkspaceDir = runtime.agent.resolveAgentWorkspaceDir(cfg, agentId);
-  } catch {
-  }
   const latestResult = readLatestRealtimeResult(params.stateDir);
   let retryReason = "";
   const embeddedReviewerTarget = resolveEmbeddedReviewerProviderAndModel(
@@ -7240,6 +7235,8 @@ async function runEmbeddedRealtimePlanReview(params) {
   let lastError = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
     const tempDir = (0, import_fs7.mkdtempSync)((0, import_path7.join)((0, import_os7.tmpdir)(), "harness-plan-review-"));
+    const reviewWorkspaceDir = (0, import_path7.join)(tempDir, "ws");
+    (0, import_fs7.mkdirSync)(reviewWorkspaceDir, { recursive: true });
     const reviewerSessionId = `harness-plan-review-${params.jobId}-r${params.round}-a${attempt}-${Date.now()}`;
     const reviewerSessionKey = buildHarnessSubagentSessionKey(
       agentId,
@@ -7299,8 +7296,27 @@ async function runEmbeddedRealtimePlanReview(params) {
     } catch (err) {
       const message = err?.message ?? String(err);
       lastError = message;
-      if (!isTransientEmbeddedReviewError(message) || attempt >= 4) {
-        throw err;
+      const exhausted = attempt >= 4 || !isTransientEmbeddedReviewError(message);
+      if (exhausted) {
+        const truncated = message.replace(/\s+/g, " ").trim().slice(0, 240);
+        const fallbackBody = [
+          `Plan review fallback: the embedded reviewer was unavailable after ${attempt} attempt(s) (last error: ${truncated}).`,
+          `Proceeding with the worker's current plan as-is. Worker should follow the spec strictly:`,
+          `implement only what the acceptance criteria require, do not expand scope, run focused validation,`,
+          `and surface any blockers explicitly. Implementation review will catch divergence in a later round.`
+        ].join(" ");
+        console.warn(
+          `[harness] Embedded ${params.kind} review giving up after ${attempt} attempt(s) \u2014 falling back to PROCEED. Error: ${message}`
+        );
+        return {
+          kind: params.kind,
+          verdict: "PROCEED",
+          body: fallbackBody,
+          feedback: fallbackBody,
+          rawText: `[fallback] ${message}`,
+          reviewerSessionId,
+          round: params.round
+        };
       }
       const backoffMs = Math.min(5e3 * attempt, 15e3);
       console.warn(
@@ -7849,20 +7865,29 @@ async function sendHarnessNotification(channel, ctx, message) {
     const { execFile: execFileCb } = await import("child_process");
     const { promisify } = await import("util");
     const execFileAsync = promisify(execFileCb);
-    const target = channel || pluginConfig.fallbackChannel;
+    const fallback = pluginConfig.fallbackChannel;
+    const channelHasTarget = !!channel && channel.split("|").length >= 2;
+    let target;
+    if (channelHasTarget) {
+      target = channel;
+    } else if (fallback && (!channel || fallback.startsWith(`${channel}|`))) {
+      target = fallback;
+    } else {
+      target = channel || fallback;
+    }
     if (!target || target === "unknown") {
       console.warn(`[harness] No notification channel available, logging result only`);
       return;
     }
     const parts = target.split("|");
     const args = ["message", "send", "--message", message.slice(0, 4e3)];
-    if (parts.length >= 2) {
-      args.push("--channel", parts[0]);
-    }
     if (parts.length >= 3) {
-      args.push("-t", parts[2]);
+      args.push("--channel", parts[0], "--account", parts[1], "-t", parts[2]);
     } else if (parts.length === 2) {
-      args.push("-t", parts[1]);
+      args.push("--channel", parts[0], "-t", parts[1]);
+    } else {
+      console.warn(`[harness] Notification channel "${target}" lacks a target \u2014 skipping send`);
+      return;
     }
     await execFileAsync("openclaw", args, { timeout: 15e3 });
   } catch (err) {

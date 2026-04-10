@@ -1264,12 +1264,13 @@ async function runEmbeddedRealtimePlanReview(params: {
     agentDir = undefined;
   }
 
-  let reviewWorkspaceDir = params.ctx.workspaceDir || process.cwd();
-  try {
-    reviewWorkspaceDir = runtime.agent.resolveAgentWorkspaceDir(cfg, agentId);
-  } catch {
-    // fall back to the invoking context workspace
-  }
+  // Plan review must NOT use the calling agent's workspace as the bootstrap
+  // root: OpenClaw's runEmbeddedPiAgent auto-injects file-tree context from
+  // workspaceDir into the prompt, which can balloon to 100KB+ on large repos
+  // (binary files in _archive/, full git status, etc.) and trigger context
+  // overflow. The review only needs the prompt we build below — it never
+  // touches workspace files. Each attempt uses an empty temp dir as its
+  // workspace so the inject pass produces nothing.
 
   const latestResult = readLatestRealtimeResult(params.stateDir);
   let retryReason = "";
@@ -1281,6 +1282,8 @@ async function runEmbeddedRealtimePlanReview(params: {
   let lastError: string | null = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
     const tempDir = mkdtempSync(join(tmpdir(), "harness-plan-review-"));
+    const reviewWorkspaceDir = join(tempDir, "ws");
+    mkdirSync(reviewWorkspaceDir, { recursive: true });
     const reviewerSessionId = `harness-plan-review-${params.jobId}-r${params.round}-a${attempt}-${Date.now()}`;
     const reviewerSessionKey = buildHarnessSubagentSessionKey(
       agentId,
@@ -1356,8 +1359,32 @@ async function runEmbeddedRealtimePlanReview(params: {
     } catch (err: any) {
       const message = err?.message ?? String(err);
       lastError = message;
-      if (!isTransientEmbeddedReviewError(message) || attempt >= 4) {
-        throw err;
+      const exhausted = attempt >= 4 || !isTransientEmbeddedReviewError(message);
+      if (exhausted) {
+        // Don't take down the whole worker just because plan review failed.
+        // Plan review is a quality gate, not a hard correctness check —
+        // implementation review (Layer 1) still runs each round and will
+        // catch divergence. Returning PROCEED here lets the worker advance
+        // past the plan checkpoint instead of cascading into a task abort.
+        const truncated = message.replace(/\s+/g, " ").trim().slice(0, 240);
+        const fallbackBody = [
+          `Plan review fallback: the embedded reviewer was unavailable after ${attempt} attempt(s) (last error: ${truncated}).`,
+          `Proceeding with the worker's current plan as-is. Worker should follow the spec strictly:`,
+          `implement only what the acceptance criteria require, do not expand scope, run focused validation,`,
+          `and surface any blockers explicitly. Implementation review will catch divergence in a later round.`,
+        ].join(" ");
+        console.warn(
+          `[harness] Embedded ${params.kind} review giving up after ${attempt} attempt(s) — falling back to PROCEED. Error: ${message}`,
+        );
+        return {
+          kind: params.kind,
+          verdict: "PROCEED",
+          body: fallbackBody,
+          feedback: fallbackBody,
+          rawText: `[fallback] ${message}`,
+          reviewerSessionId,
+          round: params.round,
+        };
       }
       const backoffMs = Math.min(5000 * attempt, 15000);
       console.warn(
@@ -2293,7 +2320,20 @@ async function sendHarnessNotification(
     const execFileAsync = promisify(execFileCb);
 
     // Try openclaw message send CLI (works with any configured channel)
-    const target = channel || pluginConfig.fallbackChannel;
+    // OpenClaw core often passes a bare channel name (e.g. "telegram") in
+    // ctx.messageChannel. That alone has no account/target, so the CLI call
+    // fails with "required option -t, --target". Fall back to the configured
+    // fallbackChannel whenever the bare form is unusable.
+    const fallback = pluginConfig.fallbackChannel;
+    const channelHasTarget = !!channel && channel.split("|").length >= 2;
+    let target: string | undefined;
+    if (channelHasTarget) {
+      target = channel;
+    } else if (fallback && (!channel || fallback.startsWith(`${channel}|`))) {
+      target = fallback;
+    } else {
+      target = channel || fallback;
+    }
     if (!target || target === "unknown") {
       console.warn(`[harness] No notification channel available, logging result only`);
       return;
@@ -2302,15 +2342,18 @@ async function sendHarnessNotification(
     // Parse channel format: "telegram|account|chatId" or "telegram|chatId"
     const parts = target.split("|");
     const args = ["message", "send", "--message", message.slice(0, 4000)];
-    if (parts.length >= 2) {
-      args.push("--channel", parts[0]);
-    }
     if (parts.length >= 3) {
-      // 3-segment: channel|account|target
-      args.push("-t", parts[2]);
+      // 3-segment: channel|account|target — multi-account environments need
+      // --account so the right bot picks up the message.
+      args.push("--channel", parts[0], "--account", parts[1], "-t", parts[2]);
     } else if (parts.length === 2) {
       // 2-segment: channel|target
-      args.push("-t", parts[1]);
+      args.push("--channel", parts[0], "-t", parts[1]);
+    } else {
+      // Single-segment fallback — let CLI fail with a clear error rather
+      // than send to an unknown destination.
+      console.warn(`[harness] Notification channel "${target}" lacks a target — skipping send`);
+      return;
     }
 
     await execFileAsync("openclaw", args, { timeout: 15000 });
