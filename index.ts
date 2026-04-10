@@ -33,7 +33,7 @@ export function register(api: any) {
   // Cache factory results per agent to avoid MCP tool-set-change detection
   // triggering cli session resets on every request.
   const toolCache = new Map<string, any>();
-  const cacheKey = (name: string, ctx: any) => `${name}:${ctx?.agentId ?? ""}:${ctx?.workspaceDir ?? ""}`;
+  const cacheKey = (name: string, ctx: any) => `${name}:${ctx?.agentId ?? ""}:${ctx?.workspaceDir ?? ""}:${ctx?.messageChannel ?? ""}`;
   const cachedFactory = (name: string, make: (ctx: any) => any) => (ctx: any) => {
     const key = cacheKey(name, ctx);
     const cached = toolCache.get(key);

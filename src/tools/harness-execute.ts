@@ -134,6 +134,28 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       const existingCheckpoint: CheckpointData | null = autoResumeCheckpoint;
 
       if (existingCheckpoint) {
+        // If checkpoint is still "running", an async background run is already in flight.
+        // Do NOT restart it — report the existing plan instead. This prevents double-execution
+        // when the caller retries the same request before the first run finishes.
+        if (existingCheckpoint.status === "running") {
+          console.log(`[harness] Existing run still active: ${existingCheckpoint.runId} — skipping duplicate execution`);
+          return {
+            content: [{
+              type: "text",
+              text: [
+                `## Harness: Already Running`,
+                ``,
+                `**Plan:** ${existingCheckpoint.runId}`,
+                `**Status:** running`,
+                `**Tasks:** ${existingCheckpoint.tasks.length}`,
+                ``,
+                `A background run for this request is already in progress. Results will be pushed when complete.`,
+                `Monitor: \`cat /tmp/harness/${existingCheckpoint.runId}/checkpoint.json\``,
+              ].join("\n"),
+            }],
+          };
+        }
+
         console.log(`[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`);
         const plan = existingCheckpoint.plan;
         const runState = buildExecutionRunState(existingCheckpoint);
@@ -769,11 +791,11 @@ async function executeTask(
           resumeSessionId: reviewerCodexSessionId,
         });
 
-        // Capture session ID from primary for subsequent resumes
-        if (!reviewerCodexSessionId && consensusResult.primary.taskId) {
-          // Session ID is tracked via recordSession below
+        // Capture primary Codex session ID for subsequent resumes
+        if (!reviewerCodexSessionId && consensusResult.primarySessionId) {
+          reviewerCodexSessionId = consensusResult.primarySessionId;
         }
-        recordSession(checkpoint, task.id, "reviewer", `consensus-${consensusResult.mode}`, workdir);
+        recordSession(checkpoint, task.id, "reviewer", consensusResult.primarySessionId ?? `consensus-${consensusResult.mode}`, workdir);
 
         console.log(
           `[harness] Reviewer consensus done: task=${task.id}, loop=${reviewLoop.history.length + 1}, mode=${consensusResult.mode}, result=${consensusResult.consensus.result}`,
@@ -1303,12 +1325,24 @@ async function waitForRealtimeTerminalState(
       ? timeSinceLastHbeat >= HEARTBEAT_INITIAL_MS
       : timeSinceLastHbeat >= HEARTBEAT_INTERVAL_MS;
 
-    if (heartbeatDue && notifyChannel && notifyChannel !== "unknown") {
-      const round = detectLatestRealtimeRound(stateDir);
-      const elapsedSec = Math.round(elapsed / 1000);
-      sendHarnessNotification(notifyChannel, ctx,
-        `⏳ ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`,
-      ).catch(() => {});
+    if (heartbeatDue) {
+      // Touch the checkpoint file so stale cleanup knows this plan is alive
+      // (cleanup checks filesystem mtime, not just JSON lastUpdated).
+      try {
+        const cpPath = join("/tmp", "harness", plan.id, "checkpoint.json");
+        if (existsSync(cpPath)) {
+          const now = new Date();
+          require("fs").utimesSync(cpPath, now, now);
+        }
+      } catch { /* best-effort */ }
+
+      if (notifyChannel && notifyChannel !== "unknown") {
+        const round = detectLatestRealtimeRound(stateDir);
+        const elapsedSec = Math.round(elapsed / 1000);
+        sendHarnessNotification(notifyChannel, ctx,
+          `⏳ ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`,
+        ).catch(() => {});
+      }
       lastHeartbeatAt = Date.now();
     }
 

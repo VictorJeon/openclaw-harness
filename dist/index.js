@@ -224,7 +224,15 @@ function cleanupStaleCheckpoints() {
         if (isNaN(lastUpdated)) continue;
         const age = now - lastUpdated;
         const isTerminal = cp.status === "complete" || cp.status === "failed" || cp.status === "escalated" || cp.status === "aborted";
-        const shouldRemove = isTerminal ? age > STALE_COMPLETE_MS : cp.status === "running" && age > STALE_PLANNING_MS;
+        let fileAge = age;
+        if (cp.status === "running") {
+          try {
+            const fileStat = (0, import_fs3.statSync)(cpPath);
+            fileAge = Math.min(age, now - fileStat.mtimeMs);
+          } catch {
+          }
+        }
+        const shouldRemove = isTerminal ? age > STALE_COMPLETE_MS : cp.status === "running" && fileAge > STALE_PLANNING_MS;
         if (shouldRemove) {
           (0, import_fs3.rmSync)(dirPath, { recursive: true, force: true });
           removed++;
@@ -6008,7 +6016,7 @@ async function runReviewerConsensus(options) {
     const bothFail = primaryResult.result === "fail" && secondaryResult.result === "fail";
     if (bothPass) {
       console.log(`[consensus] Both reviewers pass for ${options.task.id}`);
-      return { primary: primaryResult, secondary: secondaryResult, consensus: primaryResult, mode: "both" };
+      return { primary: primaryResult, secondary: secondaryResult, consensus: primaryResult, mode: "both", primarySessionId: primaryRaw.sessionId };
     }
     if (bothFail) {
       const mergedGaps = [...primaryResult.gaps];
@@ -6022,21 +6030,21 @@ async function runReviewerConsensus(options) {
         gaps: mergedGaps
       };
       console.log(`[consensus] Both reviewers fail for ${options.task.id}: ${mergedGaps.length} merged gaps`);
-      return { primary: primaryResult, secondary: secondaryResult, consensus: merged, mode: "both" };
+      return { primary: primaryResult, secondary: secondaryResult, consensus: merged, mode: "both", primarySessionId: primaryRaw.sessionId };
     }
     const failResult = primaryResult.result === "fail" ? primaryResult : secondaryResult;
     console.log(`[consensus] Reviewer disagreement for ${options.task.id}: primary=${primaryResult.result}, secondary=${secondaryResult.result} \u2192 using fail`);
-    return { primary: primaryResult, secondary: secondaryResult, consensus: failResult, mode: "both" };
+    return { primary: primaryResult, secondary: secondaryResult, consensus: failResult, mode: "both", primarySessionId: primaryRaw.sessionId };
   }
   if (primaryResult) {
     if (secondaryRaw?.error) {
       console.warn(`[consensus] Secondary reviewer failed: ${secondaryRaw.error}`);
     }
-    return { primary: primaryResult, secondary: null, consensus: primaryResult, mode: "primary-only" };
+    return { primary: primaryResult, secondary: null, consensus: primaryResult, mode: "primary-only", primarySessionId: primaryRaw.sessionId };
   }
   if (secondaryResult) {
     console.warn(`[consensus] Primary reviewer failed: ${primaryRaw.error}`);
-    return { primary: secondaryResult, secondary: null, consensus: secondaryResult, mode: "secondary-only" };
+    return { primary: secondaryResult, secondary: null, consensus: secondaryResult, mode: "secondary-only", primarySessionId: void 0 };
   }
   console.error(`[consensus] Both reviewers failed: primary=${primaryRaw.error}, secondary=${secondaryRaw?.error}`);
   const fallback = {
@@ -6046,7 +6054,7 @@ async function runReviewerConsensus(options) {
     rerunNeeded: true,
     retryReviewer: true
   };
-  return { primary: fallback, secondary: null, consensus: fallback, mode: "primary-only" };
+  return { primary: fallback, secondary: null, consensus: fallback, mode: "primary-only", primarySessionId: void 0 };
 }
 
 // src/meta-reviewer.ts
@@ -6428,6 +6436,24 @@ function makeHarnessExecuteTool(ctx) {
       }
       const existingCheckpoint = autoResumeCheckpoint;
       if (existingCheckpoint) {
+        if (existingCheckpoint.status === "running") {
+          console.log(`[harness] Existing run still active: ${existingCheckpoint.runId} \u2014 skipping duplicate execution`);
+          return {
+            content: [{
+              type: "text",
+              text: [
+                `## Harness: Already Running`,
+                ``,
+                `**Plan:** ${existingCheckpoint.runId}`,
+                `**Status:** running`,
+                `**Tasks:** ${existingCheckpoint.tasks.length}`,
+                ``,
+                `A background run for this request is already in progress. Results will be pushed when complete.`,
+                `Monitor: \`cat /tmp/harness/${existingCheckpoint.runId}/checkpoint.json\``
+              ].join("\n")
+            }]
+          };
+        }
         console.log(`[harness] Auto-resuming recoverable checkpoint: ${existingCheckpoint.runId}`);
         const plan2 = existingCheckpoint.plan;
         const runState = buildExecutionRunState(existingCheckpoint);
@@ -6862,9 +6888,10 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
           workdir,
           resumeSessionId: reviewerCodexSessionId
         });
-        if (!reviewerCodexSessionId && consensusResult.primary.taskId) {
+        if (!reviewerCodexSessionId && consensusResult.primarySessionId) {
+          reviewerCodexSessionId = consensusResult.primarySessionId;
         }
-        recordSession(checkpoint, task.id, "reviewer", `consensus-${consensusResult.mode}`, workdir);
+        recordSession(checkpoint, task.id, "reviewer", consensusResult.primarySessionId ?? `consensus-${consensusResult.mode}`, workdir);
         console.log(
           `[harness] Reviewer consensus done: task=${task.id}, loop=${reviewLoop.history.length + 1}, mode=${consensusResult.mode}, result=${consensusResult.consensus.result}`
         );
@@ -7263,15 +7290,25 @@ async function waitForRealtimeTerminalState(stateDir, jobId, task, plan, ctx, wo
     const elapsed = Date.now() - startedAt;
     const timeSinceLastHbeat = Date.now() - lastHeartbeatAt;
     const heartbeatDue = elapsed < HEARTBEAT_INITIAL_MS + 5e3 ? timeSinceLastHbeat >= HEARTBEAT_INITIAL_MS : timeSinceLastHbeat >= HEARTBEAT_INTERVAL_MS;
-    if (heartbeatDue && notifyChannel && notifyChannel !== "unknown") {
-      const round = detectLatestRealtimeRound(stateDir);
-      const elapsedSec = Math.round(elapsed / 1e3);
-      sendHarnessNotification(
-        notifyChannel,
-        ctx,
-        `\u23F3 ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`
-      ).catch(() => {
-      });
+    if (heartbeatDue) {
+      try {
+        const cpPath = (0, import_path7.join)("/tmp", "harness", plan.id, "checkpoint.json");
+        if ((0, import_fs7.existsSync)(cpPath)) {
+          const now = /* @__PURE__ */ new Date();
+          require("fs").utimesSync(cpPath, now, now);
+        }
+      } catch {
+      }
+      if (notifyChannel && notifyChannel !== "unknown") {
+        const round = detectLatestRealtimeRound(stateDir);
+        const elapsedSec = Math.round(elapsed / 1e3);
+        sendHarnessNotification(
+          notifyChannel,
+          ctx,
+          `\u23F3 ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`
+        ).catch(() => {
+        });
+      }
       lastHeartbeatAt = Date.now();
     }
     const reviewMode = realtimeCheckpointReviewModeForStatus(lastStatus, stateDir, goal);
@@ -10769,7 +10806,7 @@ function register(api) {
   let nr = null;
   let cleanupInterval = null;
   const toolCache = /* @__PURE__ */ new Map();
-  const cacheKey = (name, ctx) => `${name}:${ctx?.agentId ?? ""}:${ctx?.workspaceDir ?? ""}`;
+  const cacheKey = (name, ctx) => `${name}:${ctx?.agentId ?? ""}:${ctx?.workspaceDir ?? ""}:${ctx?.messageChannel ?? ""}`;
   const cachedFactory = (name, make) => (ctx) => {
     const key = cacheKey(name, ctx);
     const cached = toolCache.get(key);

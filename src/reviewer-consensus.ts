@@ -24,6 +24,7 @@ export interface ConsensusResult {
   secondary: ReviewResult | null;
   consensus: ReviewResult;
   mode: "both" | "primary-only" | "secondary-only";
+  primarySessionId?: string;
 }
 
 export async function runReviewerConsensus(options: {
@@ -101,7 +102,7 @@ export async function runReviewerConsensus(options: {
 
     if (bothPass) {
       console.log(`[consensus] Both reviewers pass for ${options.task.id}`);
-      return { primary: primaryResult, secondary: secondaryResult, consensus: primaryResult, mode: "both" };
+      return { primary: primaryResult, secondary: secondaryResult, consensus: primaryResult, mode: "both", primarySessionId: primaryRaw.sessionId };
     }
 
     if (bothFail) {
@@ -117,13 +118,13 @@ export async function runReviewerConsensus(options: {
         gaps: mergedGaps,
       };
       console.log(`[consensus] Both reviewers fail for ${options.task.id}: ${mergedGaps.length} merged gaps`);
-      return { primary: primaryResult, secondary: secondaryResult, consensus: merged, mode: "both" };
+      return { primary: primaryResult, secondary: secondaryResult, consensus: merged, mode: "both", primarySessionId: primaryRaw.sessionId };
     }
 
     // Disagreement → conservative fail (use the one that found gaps)
     const failResult = primaryResult.result === "fail" ? primaryResult : secondaryResult;
     console.log(`[consensus] Reviewer disagreement for ${options.task.id}: primary=${primaryResult.result}, secondary=${secondaryResult.result} → using fail`);
-    return { primary: primaryResult, secondary: secondaryResult, consensus: failResult, mode: "both" };
+    return { primary: primaryResult, secondary: secondaryResult, consensus: failResult, mode: "both", primarySessionId: primaryRaw.sessionId };
   }
 
   // Graceful degradation: one reviewer failed
@@ -131,12 +132,12 @@ export async function runReviewerConsensus(options: {
     if (secondaryRaw?.error) {
       console.warn(`[consensus] Secondary reviewer failed: ${secondaryRaw.error}`);
     }
-    return { primary: primaryResult, secondary: null, consensus: primaryResult, mode: "primary-only" };
+    return { primary: primaryResult, secondary: null, consensus: primaryResult, mode: "primary-only", primarySessionId: primaryRaw.sessionId };
   }
 
   if (secondaryResult) {
     console.warn(`[consensus] Primary reviewer failed: ${primaryRaw.error}`);
-    return { primary: secondaryResult, secondary: null, consensus: secondaryResult, mode: "secondary-only" };
+    return { primary: secondaryResult, secondary: null, consensus: secondaryResult, mode: "secondary-only", primarySessionId: undefined };
   }
 
   // Both failed — return a retry-needed result
@@ -148,5 +149,5 @@ export async function runReviewerConsensus(options: {
     rerunNeeded: true,
     retryReviewer: true,
   };
-  return { primary: fallback, secondary: null, consensus: fallback, mode: "primary-only" };
+  return { primary: fallback, secondary: null, consensus: fallback, mode: "primary-only", primarySessionId: undefined };
 }

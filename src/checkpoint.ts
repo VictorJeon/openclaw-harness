@@ -290,9 +290,21 @@ export function cleanupStaleCheckpoints(): { removed: number; errors: number } {
         const isTerminal = cp.status === "complete" || cp.status === "failed"
           || cp.status === "escalated" || (cp.status as string) === "aborted";
 
+        // For "running" plans, also check the checkpoint file's filesystem mtime.
+        // The heartbeat loop doesn't update lastUpdated in the JSON, but
+        // saveCheckpoint() touches the file. If the file was written recently
+        // (within STALE_PLANNING_MS), the plan is still actively running.
+        let fileAge = age;
+        if (cp.status === "running") {
+          try {
+            const fileStat = statSync(cpPath);
+            fileAge = Math.min(age, now - fileStat.mtimeMs);
+          } catch { /* use JSON age */ }
+        }
+
         const shouldRemove = isTerminal
           ? age > STALE_COMPLETE_MS
-          : cp.status === "running" && age > STALE_PLANNING_MS;
+          : cp.status === "running" && fileAge > STALE_PLANNING_MS;
 
         if (shouldRemove) {
           rmSync(dirPath, { recursive: true, force: true });
