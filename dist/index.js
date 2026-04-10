@@ -235,6 +235,7 @@ function cleanupStaleCheckpoints() {
         const shouldRemove = isTerminal ? age > STALE_COMPLETE_MS : cp.status === "running" && fileAge > STALE_PLANNING_MS;
         if (shouldRemove) {
           (0, import_fs3.rmSync)(dirPath, { recursive: true, force: true });
+          cleanupWorkspaceForPlan(dirName);
           removed++;
         }
       } catch {
@@ -246,16 +247,82 @@ function cleanupStaleCheckpoints() {
   if (removed > 0) {
     console.log(`[checkpoint] Stale cleanup: removed ${removed} plan(s), errors ${errors}`);
   }
+  cleanupOrphanedWorkspaces(now);
   return { removed, errors };
 }
-var import_fs3, import_process, import_path3, STALE_PLANNING_MS, STALE_COMPLETE_MS;
+function cleanupWorkspaceForPlan(planId) {
+  const statePath = (0, import_path3.join)(WORKSPACE_ROOT, "state", `${planId}.json`);
+  try {
+    if ((0, import_fs3.existsSync)(statePath)) {
+      const state = JSON.parse((0, import_fs3.readFileSync)(statePath, "utf-8"));
+      const cleanupRoot = state?.cleanupRoot ?? state?.executionWorkdir;
+      if (cleanupRoot && (0, import_fs3.existsSync)(cleanupRoot)) {
+        (0, import_fs3.rmSync)(cleanupRoot, { recursive: true, force: true });
+        console.log(`[checkpoint] Cleaned workspace: ${cleanupRoot}`);
+      }
+      (0, import_fs3.rmSync)(statePath, { force: true });
+    }
+  } catch {
+  }
+  try {
+    if ((0, import_fs3.existsSync)(WORKSPACE_ROOT)) {
+      for (const entry of (0, import_fs3.readdirSync)(WORKSPACE_ROOT)) {
+        if (entry === "state") continue;
+        if (entry.startsWith(planId)) {
+          const wsPath = (0, import_path3.join)(WORKSPACE_ROOT, entry);
+          (0, import_fs3.rmSync)(wsPath, { recursive: true, force: true });
+          console.log(`[checkpoint] Cleaned workspace dir: ${wsPath}`);
+        }
+      }
+    }
+  } catch {
+  }
+}
+function cleanupOrphanedWorkspaces(now) {
+  if (!(0, import_fs3.existsSync)(WORKSPACE_ROOT)) return;
+  const checkpointsRoot = (0, import_path3.join)("/tmp", "harness");
+  const activePlanIds = /* @__PURE__ */ new Set();
+  try {
+    if ((0, import_fs3.existsSync)(checkpointsRoot)) {
+      for (const dirName of (0, import_fs3.readdirSync)(checkpointsRoot)) {
+        activePlanIds.add(dirName);
+      }
+    }
+  } catch {
+  }
+  try {
+    for (const entry of (0, import_fs3.readdirSync)(WORKSPACE_ROOT)) {
+      if (entry === "state") continue;
+      const planIdMatch = entry.match(/^(plan-\d{8}-[a-z0-9]+)/);
+      if (!planIdMatch) continue;
+      const planId = planIdMatch[1];
+      if (activePlanIds.has(planId)) continue;
+      const wsPath = (0, import_path3.join)(WORKSPACE_ROOT, entry);
+      try {
+        const stat = (0, import_fs3.statSync)(wsPath);
+        const age = now - stat.mtimeMs;
+        if (age > STALE_COMPLETE_MS) {
+          (0, import_fs3.rmSync)(wsPath, { recursive: true, force: true });
+          console.log(`[checkpoint] Cleaned orphaned workspace: ${wsPath} (age ${Math.round(age / 6e4)}min)`);
+          const statePath = (0, import_path3.join)(WORKSPACE_ROOT, "state", `${planId}.json`);
+          (0, import_fs3.rmSync)(statePath, { force: true });
+        }
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+var import_fs3, import_process, import_os3, import_path3, STALE_PLANNING_MS, STALE_COMPLETE_MS, WORKSPACE_ROOT;
 var init_checkpoint = __esm({
   "src/checkpoint.ts"() {
     import_fs3 = require("fs");
     import_process = require("process");
+    import_os3 = require("os");
     import_path3 = require("path");
     STALE_PLANNING_MS = 30 * 60 * 1e3;
     STALE_COMPLETE_MS = 60 * 60 * 1e3;
+    WORKSPACE_ROOT = (0, import_path3.join)((0, import_os3.homedir)(), ".openclaw", "harness-execution-workspaces");
   }
 });
 
@@ -3643,7 +3710,7 @@ function makeClaudeLaunchTool(ctx) {
 var import_child_process4 = require("child_process");
 var import_crypto3 = require("crypto");
 var import_fs7 = require("fs");
-var import_os6 = require("os");
+var import_os7 = require("os");
 var import_path7 = require("path");
 
 // src/backend/local-cc.ts
@@ -5580,7 +5647,7 @@ function formatEscalation(plan, state, task) {
 // src/reviewer-runner.ts
 var import_child_process2 = require("child_process");
 var import_fs5 = require("fs");
-var import_os4 = require("os");
+var import_os5 = require("os");
 var import_path5 = require("path");
 
 // node_modules/nanoid/index.js
@@ -5615,7 +5682,7 @@ var nanoid = (size = 21) => {
 
 // src/model-resolution.ts
 var import_fs4 = require("fs");
-var import_os3 = require("os");
+var import_os4 = require("os");
 var import_path4 = require("path");
 var aliasCache = null;
 function getOpenClawConfigPath() {
@@ -5623,7 +5690,7 @@ function getOpenClawConfigPath() {
   if (explicit) return explicit;
   const stateDir = process.env.OPENCLAW_STATE_DIR?.trim();
   if (stateDir) return (0, import_path4.join)(stateDir, "openclaw.json");
-  return (0, import_path4.join)((0, import_os3.homedir)(), ".openclaw", "openclaw.json");
+  return (0, import_path4.join)((0, import_os4.homedir)(), ".openclaw", "openclaw.json");
 }
 function stripJsonComments(input) {
   let result = "";
@@ -5826,7 +5893,7 @@ function buildCodexReviewerCommand(options) {
 }
 async function runReviewerWithCodexCli(options) {
   const sessionId = options.resumeSessionId ?? `codex-review-${nanoid(8)}`;
-  const tempDir = (0, import_fs5.mkdtempSync)((0, import_path5.join)((0, import_os4.tmpdir)(), "openclaw-harness-review-"));
+  const tempDir = (0, import_fs5.mkdtempSync)((0, import_path5.join)((0, import_os5.tmpdir)(), "openclaw-harness-review-"));
   const outputFile = (0, import_path5.join)(tempDir, "last-message.txt");
   const normalizedModel = normalizeCodexModel(options.model);
   const command = buildCodexReviewerCommand({
@@ -6156,7 +6223,7 @@ function parseMetaReviewOutput(output) {
 // src/workspace-isolation.ts
 var import_fs6 = require("fs");
 var import_child_process3 = require("child_process");
-var import_os5 = require("os");
+var import_os6 = require("os");
 var import_path6 = require("path");
 function runGit(cwd, args, input) {
   return (0, import_child_process3.execFileSync)("git", args, {
@@ -6242,7 +6309,7 @@ function configureSnapshotGitIdentity(repoRoot) {
   runGit(repoRoot, ["config", "user.name", "OpenClaw Harness"]);
   runGit(repoRoot, ["config", "user.email", "harness@openclaw.local"]);
 }
-var EXECUTION_WORKSPACE_ROOT = (0, import_path6.join)((0, import_os5.homedir)(), ".openclaw", "harness-execution-workspaces");
+var EXECUTION_WORKSPACE_ROOT = (0, import_path6.join)((0, import_os6.homedir)(), ".openclaw", "harness-execution-workspaces");
 function isolationStatePath(planId) {
   return (0, import_path6.join)(EXECUTION_WORKSPACE_ROOT, "state", `${planId}.json`);
 }
@@ -6679,14 +6746,14 @@ function formatReviewOnlyResult(plan, workerResult, reviewResult, reviewLoop, ac
 }
 var REALTIME_STATE_ROOT = (0, import_path7.join)("/tmp", "claude-realtime");
 var REALTIME_SCRIPT_PATH = (0, import_path7.join)(
-  (0, import_os6.homedir)(),
+  (0, import_os7.homedir)(),
   ".openclaw",
   "workspace-nova",
   "scripts",
   "claude-realtime.sh"
 );
 var GIT_SYNC_SCRIPT_PATH = (0, import_path7.join)(
-  (0, import_os6.homedir)(),
+  (0, import_os7.homedir)(),
   ".openclaw",
   "workspace-nova",
   "scripts",
@@ -7454,7 +7521,7 @@ async function runEmbeddedRealtimePlanReview(params) {
   );
   let lastError = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
-    const tempDir = (0, import_fs7.mkdtempSync)((0, import_path7.join)((0, import_os6.tmpdir)(), "harness-plan-review-"));
+    const tempDir = (0, import_fs7.mkdtempSync)((0, import_path7.join)((0, import_os7.tmpdir)(), "harness-plan-review-"));
     const reviewerSessionId = `harness-plan-review-${params.jobId}-r${params.round}-a${attempt}-${Date.now()}`;
     const reviewerSessionKey = buildHarnessSubagentSessionKey(
       agentId,
@@ -9412,7 +9479,7 @@ var import_child_process6 = require("child_process");
 
 // src/session.ts
 var import_fs9 = require("fs");
-var import_os7 = require("os");
+var import_os8 = require("os");
 var import_path9 = require("path");
 var import_claude_agent_sdk = require("@anthropic-ai/claude-agent-sdk");
 
@@ -9568,7 +9635,7 @@ var savedAnthropicApiKey;
 function shouldPreferClaudeCredentials(baseEnv) {
   const apiKey = (baseEnv.ANTHROPIC_API_KEY ?? "").trim();
   if (!apiKey) return false;
-  const home = (baseEnv.HOME ?? "").trim() || (0, import_os7.homedir)();
+  const home = (baseEnv.HOME ?? "").trim() || (0, import_os8.homedir)();
   const credentialsPath = (0, import_path9.join)(home, ".claude", ".credentials.json");
   return (0, import_fs9.existsSync)(credentialsPath);
 }

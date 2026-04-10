@@ -1,5 +1,6 @@
 import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, realpathSync, rmSync, statSync } from "fs";
 import { kill } from "process";
+import { homedir } from "os";
 import { join, resolve } from "path";
 import type { CheckpointData, HarnessPlan, TaskStatus, WorkerResult, ReviewResult } from "./types";
 
@@ -308,6 +309,8 @@ export function cleanupStaleCheckpoints(): { removed: number; errors: number } {
 
         if (shouldRemove) {
           rmSync(dirPath, { recursive: true, force: true });
+          // Also clean up the associated execution workspace (can be 20GB+)
+          cleanupWorkspaceForPlan(dirName);
           removed++;
         }
       } catch {
@@ -322,6 +325,89 @@ export function cleanupStaleCheckpoints(): { removed: number; errors: number } {
     console.log(`[checkpoint] Stale cleanup: removed ${removed} plan(s), errors ${errors}`);
   }
 
+  // Also sweep orphaned workspace dirs that have no matching checkpoint
+  cleanupOrphanedWorkspaces(now);
+
   return { removed, errors };
+}
+
+const WORKSPACE_ROOT = join(homedir(), ".openclaw", "harness-execution-workspaces");
+
+/**
+ * Remove the execution workspace and isolation state for a given plan.
+ * Called when a stale checkpoint is cleaned up.
+ */
+function cleanupWorkspaceForPlan(planId: string): void {
+  // Isolation state: ~/.openclaw/harness-execution-workspaces/state/{planId}.json
+  const statePath = join(WORKSPACE_ROOT, "state", `${planId}.json`);
+  try {
+    if (existsSync(statePath)) {
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      const cleanupRoot = state?.cleanupRoot ?? state?.executionWorkdir;
+      if (cleanupRoot && existsSync(cleanupRoot)) {
+        rmSync(cleanupRoot, { recursive: true, force: true });
+        console.log(`[checkpoint] Cleaned workspace: ${cleanupRoot}`);
+      }
+      rmSync(statePath, { force: true });
+    }
+  } catch { /* best-effort */ }
+
+  // Also try to find workspace dir by planId prefix pattern
+  try {
+    if (existsSync(WORKSPACE_ROOT)) {
+      for (const entry of readdirSync(WORKSPACE_ROOT)) {
+        if (entry === "state") continue;
+        if (entry.startsWith(planId)) {
+          const wsPath = join(WORKSPACE_ROOT, entry);
+          rmSync(wsPath, { recursive: true, force: true });
+          console.log(`[checkpoint] Cleaned workspace dir: ${wsPath}`);
+        }
+      }
+    }
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Remove orphaned workspace dirs that have no matching checkpoint.
+ * Catches workspaces left behind by crashed runs where the checkpoint
+ * was already deleted but the 20GB+ workspace clone was not.
+ */
+function cleanupOrphanedWorkspaces(now: number): void {
+  if (!existsSync(WORKSPACE_ROOT)) return;
+
+  const checkpointsRoot = join("/tmp", "harness");
+  const activePlanIds = new Set<string>();
+  try {
+    if (existsSync(checkpointsRoot)) {
+      for (const dirName of readdirSync(checkpointsRoot)) {
+        activePlanIds.add(dirName);
+      }
+    }
+  } catch { /* ignore */ }
+
+  try {
+    for (const entry of readdirSync(WORKSPACE_ROOT)) {
+      if (entry === "state") continue;
+      // Entry format: plan-YYYYMMDD-XXXXXX-RANDOM
+      const planIdMatch = entry.match(/^(plan-\d{8}-[a-z0-9]+)/);
+      if (!planIdMatch) continue;
+
+      const planId = planIdMatch[1];
+      if (activePlanIds.has(planId)) continue; // checkpoint still exists
+
+      const wsPath = join(WORKSPACE_ROOT, entry);
+      try {
+        const stat = statSync(wsPath);
+        const age = now - stat.mtimeMs;
+        if (age > STALE_COMPLETE_MS) {
+          rmSync(wsPath, { recursive: true, force: true });
+          console.log(`[checkpoint] Cleaned orphaned workspace: ${wsPath} (age ${Math.round(age / 60000)}min)`);
+          // Also clean state file
+          const statePath = join(WORKSPACE_ROOT, "state", `${planId}.json`);
+          rmSync(statePath, { force: true });
+        }
+      } catch { /* best-effort */ }
+    }
+  } catch { /* ignore */ }
 }
 
