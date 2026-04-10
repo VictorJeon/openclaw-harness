@@ -15,7 +15,7 @@ import { registerClaudeBgCommand } from "./src/commands/claude-bg";
 import { registerClaudeResumeCommand } from "./src/commands/claude-resume";
 import { registerClaudeRespondCommand } from "./src/commands/claude-respond";
 import { registerClaudeStatsCommand } from "./src/commands/claude-stats";
-import { registerGatewayMethods } from "./src/gateway";
+import { registerGatewayMethods, setHarnessExecuteFactory } from "./src/gateway";
 import { SessionManager } from "./src/session-manager";
 import { NotificationRouter } from "./src/notifications";
 import { setSessionManager, setNotificationRouter, setPluginConfig, setPluginRuntime, pluginConfig } from "./src/shared";
@@ -65,6 +65,10 @@ export function register(api: any) {
 
   // Gateway RPC methods (Task 17)
   registerGatewayMethods(api);
+
+  // Expose the harness_execute factory to the gateway method so it can
+  // be called directly via `openclaw gateway call harness.execute`.
+  setHarnessExecuteFactory(cachedFactory("harness_execute", makeHarnessExecuteTool));
 
   // Service
   api.registerService({

@@ -2531,14 +2531,21 @@ async function sendHarnessNotification(
 
 // ── Analysis mode detection ──
 
-const ANALYSIS_KEYWORDS_KO = /\b(분석|검토|조사|확인|현황|리뷰|점검|비교|상태|살펴|파악)\b/;
+// Analysis mode: only for SHORT, clearly read-only requests.
+// Long requests (specs, PRDs) naturally contain analysis words in their body
+// and must NOT be classified as analysis-only.
+const MAX_ANALYSIS_REQUEST_LENGTH = 500;
+const ANALYSIS_KEYWORDS_KO = /(분석|검토|조사|확인|현황|리뷰|점검|비교|상태|살펴|파악)/;
 const ANALYSIS_KEYWORDS_EN = /\b(analy[sz]e|review|inspect|audit|check|status|compare|investigate|examine|diagnose)\b/i;
-const CODING_SIGNALS = /\b(create|add|implement|fix|update|modify|write|build|refactor|delete|remove|생성|추가|구현|수정|작성|만들|고쳐|삭제|제거|리팩토링)\b/i;
+// Korean word boundary doesn't work with \b — use lookahead/behind or no boundary
+const CODING_SIGNALS = /(create|add|implement|fix|update|modify|write|build|refactor|delete|remove|생성|추가|구현|수정|작성|만들|고쳐|삭제|제거|리팩토링)/i;
 
 function isAnalysisOnlyRequest(request: string): boolean {
+  // Long requests are never analysis-only (PRDs, specs contain analysis words naturally)
+  if (request.length > MAX_ANALYSIS_REQUEST_LENGTH) return false;
+
   const hasAnalysis = ANALYSIS_KEYWORDS_KO.test(request) || ANALYSIS_KEYWORDS_EN.test(request);
   const hasCoding = CODING_SIGNALS.test(request);
-  // Analysis mode only if analysis keywords present AND no coding signals
   return hasAnalysis && !hasCoding;
 }
 

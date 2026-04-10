@@ -1,19 +1,62 @@
 import { getSessionManager, pluginConfig, formatSessionListing, formatDuration, formatStats, resolveOriginChannel } from "./shared";
 
+// Lazy reference to the harness_execute tool factory. Set during registerGatewayMethods
+// so the gateway method can invoke the tool directly without going through an agent.
+let harnessExecuteFactory: ((ctx: any) => any) | null = null;
+
+export function setHarnessExecuteFactory(factory: (ctx: any) => any): void {
+  harnessExecuteFactory = factory;
+}
+
 /**
- * Task 17 — Gateway RPC methods
- *
- * Registers RPC methods so external clients (dashboard, API, other plugins)
- * can control Claude Code Plugin sessions programmatically.
+ * Gateway RPC methods
  *
  * Methods:
- *   claude-code.sessions — list sessions (optionally filtered by status)
+ *   claude-code.sessions — list sessions
  *   claude-code.launch   — launch a new session
  *   claude-code.kill     — kill a running session
  *   claude-code.output   — get output from a session
  *   claude-code.stats    — return aggregated metrics
+ *   harness.execute      — invoke harness_execute directly (bypasses agent layer)
  */
 export function registerGatewayMethods(api: any): void {
+
+  // ── harness.execute — direct tool invocation ───────────────────
+  // Bypasses the agent layer entirely. Useful when the orchestrator
+  // model (gpt-5.4) fails to reliably call the MCP tool.
+  api.registerGatewayMethod("harness.execute", ({ respond, params }: any) => {
+    if (!harnessExecuteFactory) {
+      return respond(false, { error: "harness_execute factory not registered" });
+    }
+    if (!params?.request) {
+      return respond(false, { error: "Missing required parameter: request" });
+    }
+
+    const ctx = {
+      agentId: params.agentId ?? "gateway",
+      workspaceDir: params.workdir ?? pluginConfig.defaultWorkdir ?? process.cwd(),
+      messageChannel: params.channel ?? pluginConfig.fallbackChannel,
+    };
+
+    // Respond IMMEDIATELY — the entire pipeline (including planner) runs
+    // in background. This prevents WebSocket timeout on long planner calls.
+    respond(true, { status: "accepted", message: "Harness execution started. Results will be pushed to channel." });
+
+    void (async () => {
+      try {
+        const tool = harnessExecuteFactory(ctx);
+        await tool.execute("gateway-rpc", {
+          request: params.request,
+          workdir: params.workdir,
+          tier_override: params.tier_override,
+          max_budget_usd: params.max_budget_usd,
+          reviewOnly: params.reviewOnly,
+        });
+      } catch (err: any) {
+        console.error(`[harness.execute] Gateway RPC background error: ${err?.message ?? String(err)}`);
+      }
+    })();
+  });
 
   // ── claude-code.sessions ────────────────────────────────────────
   api.registerGatewayMethod("claude-code.sessions", ({ respond, params }: any) => {

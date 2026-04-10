@@ -4935,7 +4935,7 @@ async function buildModelPlan(request, memoryContext = "", workdir = process.cwd
   return heuristicPlan;
 }
 async function waitForPlannerOutput(sessionId) {
-  const maxWaitMs = 2 * 60 * 1e3;
+  const maxWaitMs = 5 * 60 * 1e3;
   const pollIntervalMs = 1e3;
   const startTime = Date.now();
   while (Date.now() - startTime < maxWaitMs) {
@@ -8058,10 +8058,12 @@ async function sendHarnessNotification(channel, ctx, message) {
     console.warn(`[harness] Notification send failed: ${err?.message ?? String(err)}`);
   }
 }
-var ANALYSIS_KEYWORDS_KO = /\b(분석|검토|조사|확인|현황|리뷰|점검|비교|상태|살펴|파악)\b/;
+var MAX_ANALYSIS_REQUEST_LENGTH = 500;
+var ANALYSIS_KEYWORDS_KO = /(분석|검토|조사|확인|현황|리뷰|점검|비교|상태|살펴|파악)/;
 var ANALYSIS_KEYWORDS_EN = /\b(analy[sz]e|review|inspect|audit|check|status|compare|investigate|examine|diagnose)\b/i;
-var CODING_SIGNALS = /\b(create|add|implement|fix|update|modify|write|build|refactor|delete|remove|생성|추가|구현|수정|작성|만들|고쳐|삭제|제거|리팩토링)\b/i;
+var CODING_SIGNALS = /(create|add|implement|fix|update|modify|write|build|refactor|delete|remove|생성|추가|구현|수정|작성|만들|고쳐|삭제|제거|리팩토링)/i;
 function isAnalysisOnlyRequest(request) {
+  if (request.length > MAX_ANALYSIS_REQUEST_LENGTH) return false;
   const hasAnalysis = ANALYSIS_KEYWORDS_KO.test(request) || ANALYSIS_KEYWORDS_EN.test(request);
   const hasCoding = CODING_SIGNALS.test(request);
   return hasAnalysis && !hasCoding;
@@ -9222,7 +9224,39 @@ function registerClaudeStatsCommand(api) {
 }
 
 // src/gateway.ts
+var harnessExecuteFactory = null;
+function setHarnessExecuteFactory(factory) {
+  harnessExecuteFactory = factory;
+}
 function registerGatewayMethods(api) {
+  api.registerGatewayMethod("harness.execute", ({ respond, params }) => {
+    if (!harnessExecuteFactory) {
+      return respond(false, { error: "harness_execute factory not registered" });
+    }
+    if (!params?.request) {
+      return respond(false, { error: "Missing required parameter: request" });
+    }
+    const ctx = {
+      agentId: params.agentId ?? "gateway",
+      workspaceDir: params.workdir ?? pluginConfig.defaultWorkdir ?? process.cwd(),
+      messageChannel: params.channel ?? pluginConfig.fallbackChannel
+    };
+    respond(true, { status: "accepted", message: "Harness execution started. Results will be pushed to channel." });
+    void (async () => {
+      try {
+        const tool = harnessExecuteFactory(ctx);
+        await tool.execute("gateway-rpc", {
+          request: params.request,
+          workdir: params.workdir,
+          tier_override: params.tier_override,
+          max_budget_usd: params.max_budget_usd,
+          reviewOnly: params.reviewOnly
+        });
+      } catch (err) {
+        console.error(`[harness.execute] Gateway RPC background error: ${err?.message ?? String(err)}`);
+      }
+    })();
+  });
   api.registerGatewayMethod("claude-code.sessions", ({ respond, params }) => {
     const sessionManager2 = getSessionManager();
     if (!sessionManager2) {
@@ -10834,6 +10868,7 @@ function register(api) {
   registerClaudeRespondCommand(api);
   registerClaudeStatsCommand(api);
   registerGatewayMethods(api);
+  setHarnessExecuteFactory(cachedFactory("harness_execute", makeHarnessExecuteTool));
   api.registerService({
     id: "openclaw-harness",
     start: () => {

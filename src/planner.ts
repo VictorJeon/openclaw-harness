@@ -573,10 +573,10 @@ export async function buildModelPlan(
 
 /**
  * Wait for a planner session to complete and return its output text.
- * Timeout: 2 minutes (planners should be fast).
+ * Timeout: 5 minutes. Large PRDs (20KB+) can take 3+ minutes for Opus to decompose.
  */
 async function waitForPlannerOutput(sessionId: string): Promise<string> {
-  const maxWaitMs = 2 * 60 * 1000;
+  const maxWaitMs = 5 * 60 * 1000;
   const pollIntervalMs = 1000;
   const startTime = Date.now();
 
