@@ -1,4 +1,5 @@
 import type { Tier } from "./types";
+import { getSessionManager, pluginConfig } from "./shared";
 
 /**
  * Router: classify incoming request complexity into tier 0/1/2.
@@ -68,11 +69,11 @@ const TIER2_KEYWORDS = [
 
 export interface RouteResult {
   tier: Tier;
-  confidence: "pattern" | "keyword" | "fallback";
+  confidence: "pattern" | "keyword" | "llm" | "fallback";
   reason: string;
 }
 
-export function classifyRequest(request: string): RouteResult {
+export async function classifyRequest(request: string): Promise<RouteResult> {
   const normalized = request.toLowerCase().trim();
 
   // Layer 1: Pattern match → tier 0
@@ -140,20 +141,25 @@ export function classifyRequest(request: string): RouteResult {
     };
   }
 
-  // Layer 3: Fallback heuristics for ambiguous requests
-  // Long requests or complex phrasing → tier 2, else default tier 1
+  // Layer 3: LLM classification for ambiguous requests (~500 tokens)
+  // Only fires when layers 1+2 are inconclusive. Falls back to heuristic
+  // if SessionManager is unavailable or LLM call fails.
+  const llmResult = await classifyWithLlm(request);
+  if (llmResult) return llmResult;
+
+  // Layer 3 fallback: heuristic for when LLM is unavailable
   if (normalized.length > 200) {
     return {
       tier: 2,
       confidence: "fallback",
-      reason: `Long ambiguous request (${normalized.length} chars), fallback heuristics chose tier 2`,
+      reason: `Long ambiguous request (${normalized.length} chars), LLM unavailable, heuristic chose tier 2`,
     };
   }
 
   return {
     tier: 1,
     confidence: "fallback",
-    reason: "No strong signals — fallback heuristics defaulted to tier 1",
+    reason: "No strong signals, LLM unavailable — heuristic defaulted to tier 1",
   };
 }
 
@@ -183,6 +189,83 @@ function countTasks(request: string): number {
   if (commaSegments.length >= 3) return commaSegments.length;
 
   return 0;
+}
+
+// ── Layer 3: LLM classification ──
+
+const LLM_ROUTER_PROMPT = `You are a task complexity classifier. Given a coding task request, classify it as exactly one tier:
+
+- tier 1: Single bug fix, single feature, single refactor, or a small focused change. One logical unit of work.
+- tier 2: Multiple interrelated changes, migration, architecture change, multi-file refactor, or a task that needs decomposition into subtasks.
+
+Respond with ONLY a JSON object, no other text:
+{"tier": 1 or 2, "reason": "one sentence explanation"}`;
+
+const LLM_ROUTER_TIMEOUT_MS = 15_000;
+
+async function classifyWithLlm(request: string): Promise<RouteResult | null> {
+  const sm = getSessionManager();
+  if (!sm) return null;
+
+  const routerModel = pluginConfig.plannerModel || "sonnet";
+
+  try {
+    const session = sm.spawn({
+      prompt: `${LLM_ROUTER_PROMPT}\n\nRequest:\n${request.slice(0, 2000)}`,
+      name: `router-llm-${Date.now()}`,
+      workdir: process.cwd(),
+      model: routerModel,
+      maxBudgetUsd: 0.05,
+      permissionMode: "default",
+      allowedTools: [],
+      multiTurn: false,
+      internal: true,
+    });
+
+    // Poll for completion with tight timeout
+    const startTime = Date.now();
+    while (Date.now() - startTime < LLM_ROUTER_TIMEOUT_MS) {
+      const s = sm.get(session.id);
+      if (!s) break;
+      if (s.status === "completed" || s.status === "failed" || s.status === "killed") {
+        const output = s.getOutput().join("\n").trim();
+        const parsed = parseLlmRouterOutput(output);
+        if (parsed) {
+          console.log(`[router] LLM classification: tier=${parsed.tier}, model=${routerModel}, reason=${parsed.reason}`);
+          return parsed;
+        }
+        break;
+      }
+      await new Promise<void>((r) => setTimeout(r, 500));
+    }
+
+    // Timeout — kill and fall through
+    try { sm.kill(session.id); } catch { /* best-effort */ }
+  } catch (err: any) {
+    console.warn(`[router] LLM classification failed: ${err?.message ?? String(err)}`);
+  }
+
+  return null;
+}
+
+function parseLlmRouterOutput(output: string): RouteResult | null {
+  // Try to extract JSON from model output
+  const jsonMatch = output.match(/\{[\s\S]*?\}/);
+  if (!jsonMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    const tier = parsed.tier === 1 ? 1 : parsed.tier === 2 ? 2 : null;
+    if (tier === null) return null;
+
+    return {
+      tier,
+      confidence: "llm",
+      reason: `LLM: ${typeof parsed.reason === "string" ? parsed.reason.slice(0, 200) : "classified"}`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function isLikelySingleFeatureWorkflow(request: string): boolean {

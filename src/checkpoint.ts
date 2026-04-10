@@ -1,4 +1,5 @@
-import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, realpathSync } from "fs";
+import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, realpathSync, rmSync, statSync } from "fs";
+import { kill } from "process";
 import { join, resolve } from "path";
 import type { CheckpointData, HarnessPlan, TaskStatus, WorkerResult, ReviewResult } from "./types";
 
@@ -168,6 +169,59 @@ export function getPendingTasks(checkpoint: CheckpointData): string[] {
     .map((t) => t.id);
 }
 
+function isRecordedSessionAlive(sessionId?: string): boolean {
+  if (!sessionId) return false;
+  const pidMatch = sessionId.match(/-(\d{5,})$/);
+  if (!pidMatch) return true;
+  const pid = Number(pidMatch[1]);
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function checkpointHasLiveSession(checkpoint: CheckpointData): boolean {
+  const taskStates = new Map(checkpoint.tasks.map((task) => [task.id, task.status]));
+  return Object.entries(checkpoint.sessions ?? {}).some(([taskId, session]) => {
+    const status = taskStates.get(taskId);
+    if (status !== "in-progress" && status !== "in-review") return false;
+    return isRecordedSessionAlive(session.worker) || isRecordedSessionAlive(session.reviewer);
+  });
+}
+
+function reconcileStaleCheckpoint(checkpoint: CheckpointData, workdir: string): CheckpointData {
+  if (checkpoint.status !== "running") return checkpoint;
+  if (checkpointHasLiveSession(checkpoint)) return checkpoint;
+
+  const hasFailed = checkpoint.tasks.some((task) => task.status === "failed");
+  const hasCompleted = checkpoint.tasks.some((task) => task.status === "completed");
+  const hasReviewPending = checkpoint.tasks.some((task) => task.status === "in-review");
+  const hasWorkInProgress = checkpoint.tasks.some((task) => task.status === "in-progress");
+
+  if (hasReviewPending || hasWorkInProgress) {
+    checkpoint.tasks = checkpoint.tasks.map((task) => {
+      if (task.status === "in-review" || task.status === "in-progress") {
+        return { ...task, status: "failed", reviewPassed: false };
+      }
+      return task;
+    });
+  }
+
+  if (checkpoint.tasks.every((task) => task.status === "completed" && task.reviewPassed)) {
+    checkpoint.status = "complete";
+  } else if (hasFailed || hasCompleted || hasReviewPending || hasWorkInProgress) {
+    checkpoint.status = "failed";
+  } else {
+    checkpoint.status = "failed";
+  }
+  checkpoint.lastUpdated = new Date().toISOString();
+  saveCheckpoint(checkpoint, workdir);
+  return checkpoint;
+}
+
 export function findRecoverableCheckpoint(request: string, workdir: string): CheckpointData | null {
   const checkpointsRoot = join("/tmp", "harness");
   const normalizedWorkdir = normalizeWorkdirPath(workdir);
@@ -181,7 +235,8 @@ export function findRecoverableCheckpoint(request: string, workdir: string): Che
       .map((path) => {
         try {
           const raw = readFileSync(path, "utf-8");
-          return JSON.parse(raw) as CheckpointData;
+          const parsed = JSON.parse(raw) as CheckpointData;
+          return reconcileStaleCheckpoint(parsed, workdir);
         } catch {
           return null;
         }
@@ -198,5 +253,63 @@ export function findRecoverableCheckpoint(request: string, workdir: string): Che
     console.warn(`[checkpoint] Failed to search recoverable checkpoints: ${err?.message ?? String(err)}`);
     return null;
   }
+}
+
+// ── Stale plan cleanup ──
+
+const STALE_PLANNING_MS = 30 * 60 * 1000;   // 30 min for stuck "running"
+const STALE_COMPLETE_MS = 60 * 60 * 1000;   // 1 hour for terminal states
+
+/**
+ * Remove stale checkpoint directories.
+ * Called periodically from the plugin GC interval.
+ *
+ * - "running" plans older than 30 min with no recent activity → removed
+ * - Terminal plans ("complete"/"failed"/"escalated"/"aborted") older than 1 hour → removed
+ */
+export function cleanupStaleCheckpoints(): { removed: number; errors: number } {
+  const checkpointsRoot = join("/tmp", "harness");
+  if (!existsSync(checkpointsRoot)) return { removed: 0, errors: 0 };
+
+  const now = Date.now();
+  let removed = 0;
+  let errors = 0;
+
+  try {
+    for (const dirName of readdirSync(checkpointsRoot)) {
+      const dirPath = join(checkpointsRoot, dirName);
+      const cpPath = join(dirPath, "checkpoint.json");
+      if (!existsSync(cpPath)) continue;
+
+      try {
+        const cp = JSON.parse(readFileSync(cpPath, "utf-8")) as CheckpointData;
+        const lastUpdated = Date.parse(cp.lastUpdated || "");
+        if (isNaN(lastUpdated)) continue;
+
+        const age = now - lastUpdated;
+        const isTerminal = cp.status === "complete" || cp.status === "failed"
+          || cp.status === "escalated" || (cp.status as string) === "aborted";
+
+        const shouldRemove = isTerminal
+          ? age > STALE_COMPLETE_MS
+          : cp.status === "running" && age > STALE_PLANNING_MS;
+
+        if (shouldRemove) {
+          rmSync(dirPath, { recursive: true, force: true });
+          removed++;
+        }
+      } catch {
+        errors++;
+      }
+    }
+  } catch {
+    // root dir read failure
+  }
+
+  if (removed > 0) {
+    console.log(`[checkpoint] Stale cleanup: removed ${removed} plan(s), errors ${errors}`);
+  }
+
+  return { removed, errors };
 }
 

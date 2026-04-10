@@ -30,18 +30,28 @@ export function register(api: any) {
 
   // Tools — registered as factory functions so each invocation receives
   // the calling agent's context (agentId, workspaceDir, messageChannel, etc.)
-  const logCtx = (toolName: string, ctx: any) => {
-    console.log(`[harness] registerTool factory: ${toolName}, agentId=${ctx?.agentId}, workspace=${ctx?.workspaceDir}`);
+  // Cache factory results per agent to avoid MCP tool-set-change detection
+  // triggering cli session resets on every request.
+  const toolCache = new Map<string, any>();
+  const cacheKey = (name: string, ctx: any) => `${name}:${ctx?.agentId ?? ""}:${ctx?.workspaceDir ?? ""}`;
+  const cachedFactory = (name: string, make: (ctx: any) => any) => (ctx: any) => {
+    const key = cacheKey(name, ctx);
+    const cached = toolCache.get(key);
+    if (cached) return cached;
+    console.log(`[harness] registerTool factory: ${name}, agentId=${ctx?.agentId}, workspace=${ctx?.workspaceDir}`);
+    const tool = make(ctx);
+    toolCache.set(key, tool);
+    return tool;
   };
-  api.registerTool((ctx: any) => { logCtx("harness_launch", ctx); return makeClaudeLaunchTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_sessions", ctx); return makeClaudeSessionsTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_kill", ctx); return makeClaudeKillTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_output", ctx); return makeClaudeOutputTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_fg", ctx); return makeClaudeFgTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_bg", ctx); return makeClaudeBgTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_respond", ctx); return makeClaudeRespondTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_stats", ctx); return makeClaudeStatsTool(ctx); }, { optional: false });
-  api.registerTool((ctx: any) => { logCtx("harness_execute", ctx); return makeHarnessExecuteTool(ctx); }, { optional: false });
+  api.registerTool(cachedFactory("harness_launch", makeClaudeLaunchTool), { optional: false });
+  api.registerTool(cachedFactory("harness_sessions", makeClaudeSessionsTool), { optional: false });
+  api.registerTool(cachedFactory("harness_kill", makeClaudeKillTool), { optional: false });
+  api.registerTool(cachedFactory("harness_output", makeClaudeOutputTool), { optional: false });
+  api.registerTool(cachedFactory("harness_fg", makeClaudeFgTool), { optional: false });
+  api.registerTool(cachedFactory("harness_bg", makeClaudeBgTool), { optional: false });
+  api.registerTool(cachedFactory("harness_respond", makeClaudeRespondTool), { optional: false });
+  api.registerTool(cachedFactory("harness_stats", makeClaudeStatsTool), { optional: false });
+  api.registerTool(cachedFactory("harness_execute", makeHarnessExecuteTool), { optional: false });
 
   // Commands
   registerClaudeCommand(api);
@@ -184,7 +194,13 @@ export function register(api: any) {
       nr.startReminderCheck(() => sm?.list("running") ?? []);
 
       // GC interval
-      cleanupInterval = setInterval(() => sm!.cleanup(), 5 * 60 * 1000);
+      cleanupInterval = setInterval(() => {
+        sm!.cleanup();
+        try {
+          const { cleanupStaleCheckpoints } = require("./src/checkpoint");
+          cleanupStaleCheckpoints();
+        } catch { /* best-effort */ }
+      }, 5 * 60 * 1000);
     },
     stop: () => {
       if (nr) nr.stop();

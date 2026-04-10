@@ -5,13 +5,22 @@ export interface GapDefinition {
   label: string;
   description: string;
   examples: string[];
+  severity: number; // 0.0–1.0; gaps below gapMinSeverityThreshold are soft-filtered
 }
+
+/**
+ * Minimum severity for a gap to count as a hard failure.
+ * Gaps below this threshold are reported but don't trigger a fix loop.
+ * Default 0.5 — `over_engineering` (0.3) is soft-filtered.
+ */
+export const GAP_MIN_SEVERITY_THRESHOLD = 0.5;
 
 export const GAP_DEFINITIONS: Record<GapType, GapDefinition> = {
   assumption_injection: {
     type: "assumption_injection",
     label: "Assumption Injection",
     description: "Added assumptions or decisions not present in the original request.",
+    severity: 0.8,
     examples: [
       "Adding JWT authentication when not requested",
       "Choosing a specific database without being asked",
@@ -22,6 +31,7 @@ export const GAP_DEFINITIONS: Record<GapType, GapDefinition> = {
     type: "scope_creep",
     label: "Scope Creep",
     description: "Added features or complexity beyond what was requested.",
+    severity: 0.7,
     examples: [
       "Adding a notification system to a TODO app",
       "Building an admin dashboard when only asked for a form",
@@ -32,6 +42,7 @@ export const GAP_DEFINITIONS: Record<GapType, GapDefinition> = {
     type: "direction_drift",
     label: "Direction Drift",
     description: "Implementation direction diverges from the original intent.",
+    severity: 1.0,
     examples: [
       "Building a full-stack framework for a simple API",
       "Using microservices architecture for a CLI tool",
@@ -42,6 +53,7 @@ export const GAP_DEFINITIONS: Record<GapType, GapDefinition> = {
     type: "missing_core",
     label: "Missing Core",
     description: "Core functionality from the request was not implemented.",
+    severity: 1.0,
     examples: [
       "Search feature not implemented in a search task",
       "Error handling omitted from API endpoint",
@@ -52,6 +64,7 @@ export const GAP_DEFINITIONS: Record<GapType, GapDefinition> = {
     type: "over_engineering",
     label: "Over-Engineering",
     description: "Excessive abstraction or generalization beyond what the task needs.",
+    severity: 0.3,
     examples: [
       "DI container for simple CRUD operations",
       "Abstract factory pattern for a single implementation",

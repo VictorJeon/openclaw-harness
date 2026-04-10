@@ -1,5 +1,5 @@
 import type { ReviewResult, ReviewGap, TaskSpec, WorkerResult, GapType } from "./types";
-import { REVIEWER_SYSTEM_PROMPT } from "./gap-types";
+import { REVIEWER_SYSTEM_PROMPT, GAP_DEFINITIONS, GAP_MIN_SEVERITY_THRESHOLD } from "./gap-types";
 
 const VALID_GAP_TYPES: GapType[] = [
   "assumption_injection",
@@ -153,15 +153,29 @@ function validateReviewResult(parsed: any, taskId: string): ReviewResult {
     };
   }
 
-  // Derive result from gaps, not only parsed.result — prevents
-  // reviewer claiming "pass" while still reporting gaps.
-  const derivedResult = gaps.length > 0 ? "fail" : "pass";
+  // Per-gap severity filtering: gaps below threshold are reported but
+  // don't trigger a fix loop. e.g. over_engineering (0.3) is soft-filtered.
+  const hardGaps = gaps.filter((gap) => {
+    const def = GAP_DEFINITIONS[gap.type];
+    return def ? def.severity >= GAP_MIN_SEVERITY_THRESHOLD : true;
+  });
+  const softGaps = gaps.filter((gap) => {
+    const def = GAP_DEFINITIONS[gap.type];
+    return def ? def.severity < GAP_MIN_SEVERITY_THRESHOLD : false;
+  });
+
+  if (softGaps.length > 0) {
+    console.log(`[reviewer] Soft-filtered ${softGaps.length} gap(s) below severity threshold: ${softGaps.map((g) => g.type).join(", ")}`);
+  }
+
+  // Derive result from HARD gaps only — soft gaps don't trigger failure
+  const derivedResult = hardGaps.length > 0 ? "fail" : "pass";
 
   return {
     taskId: parsed.taskId ?? taskId,
     result: derivedResult,
-    gaps,
-    rerunNeeded: gaps.length > 0,
+    gaps, // Report ALL gaps (hard + soft) for transparency
+    rerunNeeded: hardGaps.length > 0,
     retryReviewer: false,
   };
 }
