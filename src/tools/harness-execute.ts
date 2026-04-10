@@ -1066,8 +1066,8 @@ async function waitForRealtimeTerminalState(
   let lastStatus = readRealtimeStatus(stateDir) ?? "launching";
   const reviewedCheckpoints = new Set<string>();
   let lastHeartbeatAt = startedAt;
-  const HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
-  const HEARTBEAT_INITIAL_MS = 20_000;  // first heartbeat at 20s
+  const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+  const HEARTBEAT_INITIAL_MS = 60_000;          // first heartbeat at 1 min
   const notifyChannel = ctx.messageChannel;
 
   while (Date.now() - startedAt < REALTIME_MAX_WAIT_MS) {
@@ -1096,9 +1096,15 @@ async function waitForRealtimeTerminalState(
 
       if (notifyChannel && notifyChannel !== "unknown") {
         const round = detectLatestRealtimeRound(stateDir);
-        const elapsedSec = Math.round(elapsed / 1000);
+        const implReviews = countImplReviewFiles(stateDir);
+        const lastVerdict = readLastImplVerdict(stateDir, implReviews);
+        const elapsedMin = Math.round(elapsed / 60000);
+        const statusEmoji = lastStatus === "waiting" ? "🔍" : lastStatus === "done" ? "✅" : "⚙️";
+        const verdictInfo = lastVerdict ? ` → ${lastVerdict}` : "";
+
         sendHarnessNotification(notifyChannel, ctx,
-          `⏳ ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`,
+          `${statusEmoji} ${task.title.slice(0, 40)} (${plan.id.slice(-6)})\n` +
+          `Task ${task.id} | Round ${round}${verdictInfo} | ${elapsedMin}min`,
         ).catch(() => {});
       }
       lastHeartbeatAt = Date.now();
@@ -1521,6 +1527,22 @@ function detectLatestRealtimeRound(stateDir: string): number {
   } catch {
     return 1;
   }
+}
+
+function countImplReviewFiles(stateDir: string): number {
+  try {
+    return readdirSync(stateDir)
+      .filter((f) => /^implementation-review-round-\d+\.source\.txt$/.test(f)).length;
+  } catch { return 0; }
+}
+
+function readLastImplVerdict(stateDir: string, count: number): string | null {
+  if (count === 0) return null;
+  try {
+    const content = readTextFileIfExists(join(stateDir, `implementation-review-round-${count}.source.txt`));
+    const match = content?.match(/verdict=(\w+)/);
+    return match?.[1] ?? null;
+  } catch { return null; }
 }
 
 function readRealtimeStatus(stateDir: string): string | null {

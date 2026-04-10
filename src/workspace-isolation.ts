@@ -222,6 +222,12 @@ export function prepareExecutionWorkspace(originalWorkdir: string, planId: strin
 export function materializeExecutionWorkspace(prepared: PreparedExecutionWorkspace): { applied: boolean; patchPath?: string; error?: string } {
   if (!prepared.isolated) return { applied: false };
 
+  // Remove stale git index.lock if left behind by a crashed git-sync or concurrent git op.
+  const lockPath = join(prepared.executionWorkdir, ".git", "index.lock");
+  if (existsSync(lockPath)) {
+    try { rmSync(lockPath, { force: true }); } catch { /* best-effort */ }
+  }
+
   runGit(prepared.executionWorkdir, ["add", "-A"]);
   const patch = readGitPatch(prepared.executionWorkdir, ["diff", "--binary", "HEAD"]);
   if (!patch.trim()) {

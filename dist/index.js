@@ -6267,6 +6267,13 @@ function prepareExecutionWorkspace(originalWorkdir, planId) {
 }
 function materializeExecutionWorkspace(prepared) {
   if (!prepared.isolated) return { applied: false };
+  const lockPath = (0, import_path6.join)(prepared.executionWorkdir, ".git", "index.lock");
+  if ((0, import_fs6.existsSync)(lockPath)) {
+    try {
+      (0, import_fs6.rmSync)(lockPath, { force: true });
+    } catch {
+    }
+  }
   runGit(prepared.executionWorkdir, ["add", "-A"]);
   const patch = readGitPatch(prepared.executionWorkdir, ["diff", "--binary", "HEAD"]);
   if (!patch.trim()) {
@@ -7006,8 +7013,8 @@ async function waitForRealtimeTerminalState(stateDir, jobId, task, plan, ctx, wo
   let lastStatus = readRealtimeStatus(stateDir) ?? "launching";
   const reviewedCheckpoints = /* @__PURE__ */ new Set();
   let lastHeartbeatAt = startedAt;
-  const HEARTBEAT_INTERVAL_MS = 3e4;
-  const HEARTBEAT_INITIAL_MS = 2e4;
+  const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1e3;
+  const HEARTBEAT_INITIAL_MS = 6e4;
   const notifyChannel = ctx.messageChannel;
   while (Date.now() - startedAt < REALTIME_MAX_WAIT_MS) {
     const currentStatus = readRealtimeStatus(stateDir);
@@ -7028,11 +7035,16 @@ async function waitForRealtimeTerminalState(stateDir, jobId, task, plan, ctx, wo
       }
       if (notifyChannel && notifyChannel !== "unknown") {
         const round = detectLatestRealtimeRound(stateDir);
-        const elapsedSec = Math.round(elapsed / 1e3);
+        const implReviews = countImplReviewFiles(stateDir);
+        const lastVerdict = readLastImplVerdict(stateDir, implReviews);
+        const elapsedMin = Math.round(elapsed / 6e4);
+        const statusEmoji = lastStatus === "waiting" ? "\u{1F50D}" : lastStatus === "done" ? "\u2705" : "\u2699\uFE0F";
+        const verdictInfo = lastVerdict ? ` \u2192 ${lastVerdict}` : "";
         sendHarnessNotification(
           notifyChannel,
           ctx,
-          `\u23F3 ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`
+          `${statusEmoji} ${task.title.slice(0, 40)} (${plan.id.slice(-6)})
+Task ${task.id} | Round ${round}${verdictInfo} | ${elapsedMin}min`
         ).catch(() => {
         });
       }
@@ -7345,6 +7357,23 @@ function detectLatestRealtimeRound(stateDir) {
     return Math.max(1, extractRealtimeRound(resultFiles[resultFiles.length - 1]));
   } catch {
     return 1;
+  }
+}
+function countImplReviewFiles(stateDir) {
+  try {
+    return (0, import_fs7.readdirSync)(stateDir).filter((f) => /^implementation-review-round-\d+\.source\.txt$/.test(f)).length;
+  } catch {
+    return 0;
+  }
+}
+function readLastImplVerdict(stateDir, count) {
+  if (count === 0) return null;
+  try {
+    const content = readTextFileIfExists((0, import_path7.join)(stateDir, `implementation-review-round-${count}.source.txt`));
+    const match = content?.match(/verdict=(\w+)/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 function readRealtimeStatus(stateDir) {
