@@ -1,5 +1,5 @@
 import { execFile } from "child_process";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { basename, join, relative, resolve } from "path";
@@ -19,6 +19,8 @@ import {
   updateTaskStatus,
 } from "../checkpoint";
 import { initReviewLoop, processReviewResult, formatEscalation, buildReviewRequest } from "../review-loop";
+import { runReviewerConsensus } from "../reviewer-consensus";
+import { runMetaReview } from "../meta-reviewer";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
 import { resolveModelAlias } from "../model-resolution";
 import { resolveReviewerExecutionTarget, runReviewerWithCodexCli } from "../reviewer-runner";
@@ -105,10 +107,28 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       const autoResumeCheckpoint = findRecoverableCheckpoint(params.request, workdir);
 
       // Step 1: Route — classify request complexity
-      const route = classifyRequest(params.request);
-      const tier = params.tier_override ?? route.tier;
+      const route = await classifyRequest(params.request);
+      const routerTier = params.tier_override ?? route.tier;
 
-      console.log(`[harness] Route: tier=${tier}, confidence=${route.confidence}, reason=${route.reason}`);
+      console.log(`[harness] Route: tier=${routerTier}, confidence=${route.confidence}, reason=${route.reason}`);
+
+      // Analysis mode: read-only requests skip worker + reviewer entirely
+      if (routerTier >= 1 && isAnalysisOnlyRequest(params.request)) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `## Harness: Analysis Mode (read-only)`,
+              ``,
+              `Request detected as analysis/review — no file modifications.`,
+              `Execute this analysis directly without spawning a worker.`,
+              ``,
+              `**Request:** ${params.request}`,
+              `**Workdir:** ${workdir}`,
+            ].join("\n"),
+          }],
+        };
+      }
 
       // Step 2: Autonomous-only execution (no approval gate)
       const existingCheckpoint: CheckpointData | null = autoResumeCheckpoint;
@@ -140,7 +160,7 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
       }
 
       // Tier 0 (non-risky): direct execution by the OpenClaw agent
-      if (tier === 0) {
+      if (routerTier === 0) {
         return {
           content: [{
             type: "text",
@@ -159,24 +179,55 @@ export function makeHarnessExecuteTool(ctx: OpenClawPluginToolContext) {
 
       const memoryContext = await loadPlanningMemory(workdir);
 
-      // Step 3: Plan
-      const plan = await createExecutionPlan(params.request, tier, memoryContext, workdir);
-      console.log(`[harness] Plan: id=${plan.id}, tasks=${plan.tasks.length}, mode=${plan.mode}`);
+      // Step 3: Plan — then apply effectiveTier = min(router, planner)
+      const plan = await createExecutionPlan(params.request, routerTier as 1 | 2, memoryContext, workdir);
+      const effectiveTier = Math.min(routerTier, plan.tier) as 0 | 1 | 2;
+      if (effectiveTier !== plan.tier) {
+        console.log(`[harness] effectiveTier override: planner=${plan.tier} → effective=${effectiveTier} (router=${routerTier})`);
+        (plan as any).tier = effectiveTier;
+      }
+      console.log(`[harness] Plan: id=${plan.id}, tasks=${plan.tasks.length}, mode=${plan.mode}, effectiveTier=${effectiveTier}`);
 
       const preparedWorkspace = prepareExecutionWorkspace(workdir, plan.id);
-
-      // Step 5: Initialize checkpoint
       const checkpoint = initCheckpoint(plan, workdir, preparedWorkspace.executionWorkdir);
 
-      // Step 6: Execute tasks (sequential or parallel based on plan.mode)
-      const taskResults = await executePlan(plan, preparedWorkspace.executionWorkdir, maxBudgetUsd, ctx, checkpoint);
-      const materialized = materializeExecutionWorkspace(preparedWorkspace);
+      // ── Fire-and-forget async execution ──
+      // Return immediately with plan_id so the orchestrator is unblocked.
+      // The actual Plan → Work → Review loop runs in background.
+      // On completion, push the final result via notification (Telegram).
+      const notificationChannel = ctx.messageChannel;
 
-      // Step 7: Format final result
+      void (async () => {
+        try {
+          const taskResults = await executePlan(plan, preparedWorkspace.executionWorkdir, maxBudgetUsd, ctx, checkpoint);
+          const materialized = materializeExecutionWorkspace(preparedWorkspace);
+          const finalText = formatFinalResult(plan, route, taskResults, mode, checkpoint, freshExecutionRunState(), materialized);
+
+          // Push final result to the originating channel
+          await sendHarnessNotification(notificationChannel, ctx, `완료 — plan ${plan.id}\n\n${finalText}`);
+          console.log(`[harness] Background run complete: plan=${plan.id}, tasks=${taskResults.length}`);
+        } catch (err: any) {
+          const errorMsg = `하네스 실패 — plan ${plan.id}: ${err?.message ?? String(err)}`;
+          await sendHarnessNotification(notificationChannel, ctx, errorMsg);
+          console.error(`[harness] Background run failed: plan=${plan.id}`, err);
+        }
+      })();
+
+      // Immediate return — orchestrator is unblocked in <3s
       return {
         content: [{
           type: "text",
-          text: formatFinalResult(plan, route, taskResults, mode, checkpoint, freshExecutionRunState(), materialized),
+          text: [
+            `## Harness: Started (async)`,
+            ``,
+            `**Plan:** ${plan.id}`,
+            `**Tasks:** ${plan.tasks.length} (${plan.mode})`,
+            `**Tier:** ${effectiveTier} | **Route:** ${route.confidence}`,
+            `**Workdir:** ${workdir}`,
+            ``,
+            `Worker is running in background. Results will be pushed to your channel when complete.`,
+            `Monitor: \`cat /tmp/harness/${plan.id}/checkpoint.json\``,
+          ].join("\n"),
         }],
       };
     },
@@ -257,36 +308,23 @@ async function executeReviewOnly(
   const reviewerReasoningEffort = pluginConfig.reviewerReasoningEffort;
   const reviewerTarget = resolveReviewerExecutionTarget(reviewModel, pluginConfig.defaultModel);
 
-  // Run review loop (no fix loop — reviewer is read-only)
+  // Run consensus review (no fix loop — reviewer is read-only)
   const reviewLoop = initReviewLoop(taskId);
   let reviewResult: ReviewResult | null = null;
   let reviewerRetryCount = 0;
 
   while (true) {
-    const basePrompt = buildReviewRequest(task, syntheticWorkerResult, request, reviewLoop);
-    const reviewPrompt = reviewerRetryCount === 0
-      ? basePrompt
-      : [basePrompt, ``, `### Retry Instructions`, `Your previous response was malformed.`, `Return only the single JSON object required by the system prompt.`].join("\n");
+    const consensusResult = await runReviewerConsensus({
+      task,
+      workerResult: syntheticWorkerResult,
+      originalRequest: request,
+      reviewLoopState: reviewLoop,
+      workdir,
+    });
 
-    let reviewOutput = "";
+    console.log(`[harness] Review-only consensus done: mode=${consensusResult.mode}, result=${consensusResult.consensus.result}, retry=${reviewerRetryCount}`);
 
-    if (reviewerTarget.backend === "codex-cli") {
-      const codexRun = await runReviewerWithCodexCli({
-        prompt: reviewPrompt,
-        workdir,
-        model: reviewerTarget.launchModel,
-        reasoningEffort: reviewerReasoningEffort,
-      });
-      reviewOutput = codexRun.output;
-    } else {
-      throw new Error(
-        `Direct-session reviewer fallback is disabled for review-only mode. Configure reviewModel to a Codex-backed target; current backend=${reviewerTarget.backend}.`,
-      );
-    }
-
-    console.log(`[harness] Review-only reviewer done: retry=${reviewerRetryCount}, backend=${reviewerTarget.backend}`);
-
-    reviewResult = parseReviewOutput(reviewOutput, taskId);
+    reviewResult = consensusResult.consensus;
     if (!reviewResult.retryReviewer) break;
 
     reviewerRetryCount++;
@@ -707,6 +745,11 @@ async function executeTask(
     // --- Review phase: cross-model review loop ---
     const reviewLoop = initReviewLoop(task.id);
     let currentWorkerResult = workerResult;
+    // Track the Codex reviewer session ID for same-session continuity
+    // across re-reviews within this task. The first review creates the
+    // session; subsequent reviews resume it so the reviewer remembers
+    // previous gaps and context.
+    let reviewerCodexSessionId: string | undefined;
 
     while (!reviewLoop.passed && !reviewLoop.escalated) {
       let reviewResult: ReviewResult | null = null;
@@ -716,39 +759,27 @@ async function executeTask(
         const reviewBudget = Math.min(perPhaseBudget, remainingBudget);
         remainingBudget -= reviewBudget;
 
-        const baseReviewPrompt = buildReviewRequest(task, currentWorkerResult, plan.originalRequest, reviewLoop);
-        const reviewPrompt = reviewerRetryCount === 0
-          ? baseReviewPrompt
-          : [
-              baseReviewPrompt,
-              ``,
-              `### Retry Instructions`,
-              `Your previous response was malformed.`,
-              `Return only the single JSON object required by the system prompt.`,
-            ].join("\n");
+        // Reviewer consensus: run primary + secondary in parallel
+        const consensusResult = await runReviewerConsensus({
+          task,
+          workerResult: currentWorkerResult,
+          originalRequest: plan.originalRequest,
+          reviewLoopState: reviewLoop,
+          workdir,
+          resumeSessionId: reviewerCodexSessionId,
+        });
 
-        let reviewOutput = "";
-
-        if (reviewerTarget.backend === "codex-cli") {
-          const codexRun = await runReviewerWithCodexCli({
-            prompt: reviewPrompt,
-            workdir,
-            model: reviewerTarget.launchModel,
-            reasoningEffort: reviewerReasoningEffort,
-          });
-          recordSession(checkpoint, task.id, "reviewer", codexRun.sessionId, workdir);
-          reviewOutput = codexRun.output;
-        } else {
-          throw new Error(
-            `Direct-session reviewer fallback is disabled for harness_execute. Configure reviewModel to a Codex-backed target; current backend=${reviewerTarget.backend}.`,
-          );
+        // Capture session ID from primary for subsequent resumes
+        if (!reviewerCodexSessionId && consensusResult.primary.taskId) {
+          // Session ID is tracked via recordSession below
         }
+        recordSession(checkpoint, task.id, "reviewer", `consensus-${consensusResult.mode}`, workdir);
 
         console.log(
-          `[harness] Reviewer done: task=${task.id}, loop=${reviewLoop.history.length + 1}, model=${reviewModel}, retry=${reviewerRetryCount}, backend=${reviewerTarget.backend}`,
+          `[harness] Reviewer consensus done: task=${task.id}, loop=${reviewLoop.history.length + 1}, mode=${consensusResult.mode}, result=${consensusResult.consensus.result}`,
         );
 
-        reviewResult = parseReviewOutput(reviewOutput, task.id);
+        reviewResult = consensusResult.consensus;
         if (!reviewResult.retryReviewer) {
           break;
         }
@@ -757,7 +788,7 @@ async function executeTask(
         if (reviewerRetryCount >= 3) {
           updateTaskStatus(checkpoint, task.id, "failed", workdir, {
             reviewPassed: false,
-            reviewLoop: reviewLoop.currentLoop,
+            reviewLoop: totalReviewLoops(reviewLoop.history.length),
           });
           return {
             taskId: task.id,
@@ -794,7 +825,7 @@ async function executeTask(
           if (finalizeResult.status !== "done") {
             updateTaskStatus(checkpoint, task.id, "failed", workdir, {
               reviewPassed: false,
-              reviewLoop: reviewLoop.currentLoop,
+              reviewLoop: totalReviewLoops(reviewLoop.history.length),
               reviewResult,
               workerResult: currentWorkerResult,
             });
@@ -815,7 +846,7 @@ async function executeTask(
 
         updateTaskStatus(checkpoint, task.id, "completed", workdir, {
           reviewPassed: true,
-          reviewLoop: reviewLoop.currentLoop,
+          reviewLoop: totalReviewLoops(reviewLoop.history.length),
           reviewResult,
           workerResult: currentWorkerResult,
         });
@@ -830,9 +861,57 @@ async function executeTask(
       }
 
       if (action.action === "escalate") {
+        // Meta-reviewer mediation before escalating to human.
+        // Gives one more chance to resolve disagreements between worker and reviewer.
+        console.log(`[harness] Fix loop exhausted for task=${task.id}, running meta-reviewer...`);
+        const metaResult = await runMetaReview({ task, plan, reviewLoopState: reviewLoop, workdir });
+        console.log(`[harness] Meta-reviewer verdict: ${metaResult.verdict} — ${metaResult.reasoning}`);
+
+        if (metaResult.verdict === "approve") {
+          // Meta-reviewer says gaps are acceptable — force pass
+          updateTaskStatus(checkpoint, task.id, "completed", workdir, {
+            reviewPassed: true,
+            reviewLoop: totalReviewLoops(reviewLoop.history.length),
+            reviewResult,
+            workerResult: currentWorkerResult,
+          });
+          return {
+            taskId: task.id,
+            workerSessionId,
+            workerResult: currentWorkerResult,
+            reviewPassed: true,
+            reviewLoops: totalReviewLoops(reviewLoop.history.length),
+            escalated: false,
+          };
+        }
+
+        if (metaResult.verdict === "revise" && metaResult.consolidatedFixPrompt) {
+          // Meta-reviewer provides one bonus fix attempt
+          console.log(`[harness] Meta-reviewer grants bonus fix round for task=${task.id}`);
+          if (useBackendDispatch && backend) {
+            const backendCtx: WorkerExecutionContext = {
+              task, plan, workdir, ctx, workerModel, workerEffort, jobId: workerSessionId,
+            };
+            const bonusResult = await backend.continueWorker(backendCtx, metaResult.consolidatedFixPrompt);
+            if (bonusResult.workerResult) {
+              currentWorkerResult = bonusResult.workerResult;
+              updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
+                reviewPassed: false,
+                reviewLoop: totalReviewLoops(reviewLoop.history.length),
+                reviewResult,
+                workerResult: currentWorkerResult,
+              });
+              // Reset escalation flag and continue the review loop for one more round
+              reviewLoop.escalated = false;
+              continue;
+            }
+          }
+        }
+
+        // Meta-reviewer says reject (or revise failed) — escalate to human
         updateTaskStatus(checkpoint, task.id, "failed", workdir, {
           reviewPassed: false,
-          reviewLoop: reviewLoop.currentLoop,
+          reviewLoop: totalReviewLoops(reviewLoop.history.length),
           reviewResult,
         });
         return {
@@ -857,7 +936,7 @@ async function executeTask(
           if (!isRealtimeReviewReadyStatus(followUpResult.status) || !followUpResult.workerResult) {
             updateTaskStatus(checkpoint, task.id, "failed", workdir, {
               reviewPassed: false,
-              reviewLoop: reviewLoop.currentLoop,
+              reviewLoop: totalReviewLoops(reviewLoop.history.length),
               reviewResult,
               workerResult: followUpResult.workerResult ?? currentWorkerResult,
             });
@@ -881,7 +960,7 @@ async function executeTask(
           currentWorkerResult = followUpResult.workerResult;
           updateTaskStatus(checkpoint, task.id, "in-review", workdir, {
             reviewPassed: false,
-            reviewLoop: reviewLoop.currentLoop,
+            reviewLoop: totalReviewLoops(reviewLoop.history.length),
             reviewResult,
             workerResult: currentWorkerResult,
           });
@@ -1206,11 +1285,31 @@ async function waitForRealtimeTerminalState(
   const startedAt = Date.now();
   let lastStatus = readRealtimeStatus(stateDir) ?? "launching";
   const reviewedCheckpoints = new Set<string>();
+  let lastHeartbeatAt = startedAt;
+  const HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
+  const HEARTBEAT_INITIAL_MS = 20_000;  // first heartbeat at 20s
+  const notifyChannel = ctx.messageChannel;
 
   while (Date.now() - startedAt < REALTIME_MAX_WAIT_MS) {
     const currentStatus = readRealtimeStatus(stateDir);
     if (currentStatus) {
       lastStatus = currentStatus;
+    }
+
+    // Heartbeat: periodic progress push so user knows worker is alive
+    const elapsed = Date.now() - startedAt;
+    const timeSinceLastHbeat = Date.now() - lastHeartbeatAt;
+    const heartbeatDue = (elapsed < HEARTBEAT_INITIAL_MS + 5000)
+      ? timeSinceLastHbeat >= HEARTBEAT_INITIAL_MS
+      : timeSinceLastHbeat >= HEARTBEAT_INTERVAL_MS;
+
+    if (heartbeatDue && notifyChannel && notifyChannel !== "unknown") {
+      const round = detectLatestRealtimeRound(stateDir);
+      const elapsedSec = Math.round(elapsed / 1000);
+      sendHarnessNotification(notifyChannel, ctx,
+        `⏳ ${jobId.slice(-12)} | ${lastStatus} | round ${round} | ${elapsedSec}s`,
+      ).catch(() => {});
+      lastHeartbeatAt = Date.now();
     }
 
     const reviewMode = realtimeCheckpointReviewModeForStatus(lastStatus, stateDir, goal);
@@ -2206,9 +2305,13 @@ function buildHarnessSubagentSessionKey(
   taskId: string,
   role: "worker" | "reviewer",
 ): string {
-  return role === "reviewer"
-    ? `agent:${agentId}:subagent:harness-${planId}-${taskId}-review`
-    : `agent:${agentId}:subagent:harness-${planId}-${taskId}`;
+  // OpenAI prompt_cache_key is capped at 64 chars. Openclaw prepends ~46
+  // chars of runtime prefix (provider, model hash, workspace, etc.) before
+  // the sessionKey when deriving the cache key. That leaves only ~18 chars
+  // for the sessionKey portion. Hash all inputs into a short stable digest.
+  const composite = `${planId}|${taskId}|${role}`;
+  const hash = createHash("sha256").update(composite).digest("hex").slice(0, 12);
+  return `h${hash}`;
 }
 
 async function getLatestSubagentAssistantText(
@@ -2355,6 +2458,56 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ── Notification helper for async completion ──
+
+async function sendHarnessNotification(
+  channel: string | undefined,
+  ctx: OpenClawPluginToolContext,
+  message: string,
+): Promise<void> {
+  try {
+    const { execFile: execFileCb } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFileCb);
+
+    // Try openclaw message send CLI (works with any configured channel)
+    const target = channel || pluginConfig.fallbackChannel;
+    if (!target || target === "unknown") {
+      console.warn(`[harness] No notification channel available, logging result only`);
+      return;
+    }
+
+    // Parse channel format: "telegram|account|chatId" or "telegram|chatId"
+    const parts = target.split("|");
+    const args = ["message", "send", "--message", message.slice(0, 4000)];
+    if (parts.length >= 2) {
+      args.push("--channel", parts[0]);
+    }
+    if (parts.length >= 3) {
+      args.push("--reply-account", parts[1], "--reply-to", parts[2]);
+    } else if (parts.length === 2) {
+      args.push("--reply-to", parts[1]);
+    }
+
+    await execFileAsync("openclaw", args, { timeout: 15000 });
+  } catch (err: any) {
+    console.warn(`[harness] Notification send failed: ${err?.message ?? String(err)}`);
+  }
+}
+
+// ── Analysis mode detection ──
+
+const ANALYSIS_KEYWORDS_KO = /\b(분석|검토|조사|확인|현황|리뷰|점검|비교|상태|살펴|파악)\b/;
+const ANALYSIS_KEYWORDS_EN = /\b(analy[sz]e|review|inspect|audit|check|status|compare|investigate|examine|diagnose)\b/i;
+const CODING_SIGNALS = /\b(create|add|implement|fix|update|modify|write|build|refactor|delete|remove|생성|추가|구현|수정|작성|만들|고쳐|삭제|제거|리팩토링)\b/i;
+
+function isAnalysisOnlyRequest(request: string): boolean {
+  const hasAnalysis = ANALYSIS_KEYWORDS_KO.test(request) || ANALYSIS_KEYWORDS_EN.test(request);
+  const hasCoding = CODING_SIGNALS.test(request);
+  // Analysis mode only if analysis keywords present AND no coding signals
+  return hasAnalysis && !hasCoding;
+}
+
 export function extractFilePaths(output: string): string[] {
   return extractRelevantFilePaths(output);
 }
@@ -2435,7 +2588,7 @@ function formatPlannerMetadata(metadata?: HarnessPlan["plannerMetadata"]): strin
 
 function formatFinalResult(
   plan: HarnessPlan,
-  route: ReturnType<typeof classifyRequest>,
+  route: import("../router").RouteResult,
   results: TaskExecutionResult[],
   mode: "autonomous",
   checkpoint: CheckpointData,

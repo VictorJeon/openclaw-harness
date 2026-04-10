@@ -111,6 +111,14 @@
         ],
         "description": "Worker backend lane selector. Phase 1 keeps remote-realtime as the default stable lane."
       },
+      "consensusReviewerModel": {
+        "type": "string",
+        "description": "Secondary reviewer model for consensus review via OpenRouter (e.g. 'deepseek/deepseek-v3.2'). If unset, consensus is disabled and only the primary reviewer runs."
+      },
+      "openRouterApiKey": {
+        "type": "string",
+        "description": "OpenRouter API key for the secondary consensus reviewer."
+      },
       "memoryV3Endpoint": {
         "type": "string",
         "description": "Optional Memory V3 search endpoint used to enrich planner context."
@@ -118,7 +126,7 @@
       "routerMaxTokens": {
         "type": "number",
         "default": 500,
-        "description": "Legacy compatibility field. Router classification is deterministic."
+        "description": "Max tokens for LLM-based router classification (Layer 3). Only used when deterministic layers are inconclusive."
       },
       "plannerMaxTokens": {
         "type": "number",

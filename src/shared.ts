@@ -115,6 +115,8 @@ export function setPluginConfig(config: Partial<PluginConfig>): void {
     workerModel: (config as any).workerModel,
     workerEffort: (config as any).workerEffort,
     reviewerReasoningEffort: (config as any).reviewerReasoningEffort,
+    consensusReviewerModel: (config as any).consensusReviewerModel,
+    openRouterApiKey: (config as any).openRouterApiKey,
     workerBackend: (config as any).workerBackend ?? "remote-realtime",
     memoryV3Endpoint: (config as any).memoryV3Endpoint,
     routerMaxTokens: (config as any).routerMaxTokens ?? 500,
