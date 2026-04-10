@@ -113,11 +113,19 @@
       },
       "consensusReviewerModel": {
         "type": "string",
-        "description": "Secondary reviewer model for consensus review via OpenRouter (e.g. 'deepseek/deepseek-v3.2'). If unset, consensus is disabled and only the primary reviewer runs."
+        "description": "Secondary reviewer model for consensus (e.g. 'glm-5.1'). If unset, only the primary reviewer runs."
+      },
+      "consensusReviewerApiKey": {
+        "type": "string",
+        "description": "API key for the secondary reviewer (Z.ai, OpenRouter, etc.)"
+      },
+      "consensusReviewerEndpoint": {
+        "type": "string",
+        "description": "Explicit API endpoint for the secondary reviewer. Auto-detected if omitted (Z.ai for non-OpenRouter keys, OpenRouter for sk-or-* keys)."
       },
       "openRouterApiKey": {
         "type": "string",
-        "description": "OpenRouter API key for the secondary consensus reviewer."
+        "description": "Legacy alias for consensusReviewerApiKey."
       },
       "memoryV3Endpoint": {
         "type": "string",

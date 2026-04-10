@@ -1,34 +1,52 @@
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
 import { REVIEWER_SYSTEM_PROMPT } from "./reviewer";
 import { pluginConfig } from "./shared";
 
 /**
- * OpenRouter-backed secondary reviewer.
- * Uses the OpenRouter API directly (not codex CLI) so we can access
- * any model (DeepSeek, GLM, Qwen, etc.) for cross-architecture consensus.
+ * Secondary reviewer via external API (OpenAI-compatible).
+ * Supports any OpenAI-compatible endpoint: OpenRouter, Z.ai, etc.
+ *
+ * Config precedence:
+ *   1. consensusReviewerEndpoint (explicit URL)
+ *   2. If key starts with "sk-or-" → OpenRouter
+ *   3. Otherwise → Z.ai coding endpoint (default)
  */
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-export interface OpenRouterReviewResult {
+const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+const ZAI_CODING_ENDPOINT = "https://api.z.ai/api/coding/paas/v4/chat/completions";
+
+function resolveEndpoint(): string {
+  if (pluginConfig.consensusReviewerEndpoint) {
+    return pluginConfig.consensusReviewerEndpoint;
+  }
+  const key = pluginConfig.consensusReviewerApiKey ?? pluginConfig.openRouterApiKey ?? "";
+  if (key.startsWith("sk-or-")) return OPENROUTER_ENDPOINT;
+  return ZAI_CODING_ENDPOINT;
+}
+
+function resolveApiKey(): string | undefined {
+  return pluginConfig.consensusReviewerApiKey ?? pluginConfig.openRouterApiKey;
+}
+
+export interface SecondaryReviewResult {
   output: string;
   model: string;
   error?: string;
 }
 
-export async function runReviewerWithOpenRouter(options: {
+export async function runReviewerWithSecondaryApi(options: {
   prompt: string;
   model?: string;
   timeoutMs?: number;
-}): Promise<OpenRouterReviewResult> {
-  const apiKey = pluginConfig.openRouterApiKey;
+}): Promise<SecondaryReviewResult> {
+  const apiKey = resolveApiKey();
   if (!apiKey) {
-    throw new Error("openRouterApiKey not configured in harness plugin config");
+    throw new Error("No API key configured for secondary reviewer (consensusReviewerApiKey or openRouterApiKey)");
   }
 
-  const model = options.model ?? pluginConfig.consensusReviewerModel ?? "deepseek/deepseek-v3.2";
+  const endpoint = resolveEndpoint();
+  const model = options.model ?? pluginConfig.consensusReviewerModel ?? "glm-5.1";
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const body = JSON.stringify({
@@ -45,21 +63,26 @@ export async function runReviewerWithOpenRouter(options: {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const headers: Record<string, string> = {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    };
+    // OpenRouter-specific headers
+    if (endpoint === OPENROUTER_ENDPOINT) {
+      headers["HTTP-Referer"] = "https://openclaw.ai";
+      headers["X-Title"] = "OpenClaw Harness Reviewer";
+    }
+
+    const res = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://openclaw.ai",
-        "X-Title": "OpenClaw Harness Reviewer",
-      },
+      headers,
       body,
       signal: controller.signal,
     });
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      throw new Error(`OpenRouter API ${res.status}: ${errText.slice(0, 300)}`);
+      throw new Error(`Secondary reviewer API ${res.status}: ${errText.slice(0, 300)}`);
     }
 
     const data = await res.json() as any;
@@ -68,10 +91,14 @@ export async function runReviewerWithOpenRouter(options: {
     return { output, model };
   } catch (err: any) {
     if (err.name === "AbortError") {
-      return { output: "", model, error: `OpenRouter timeout after ${timeoutMs}ms` };
+      return { output: "", model, error: `Secondary reviewer timeout after ${timeoutMs}ms` };
     }
     return { output: "", model, error: err?.message ?? String(err) };
   } finally {
     clearTimeout(timer);
   }
 }
+
+// Backward-compatible alias
+export { runReviewerWithSecondaryApi as runReviewerWithOpenRouter };
+export type { SecondaryReviewResult as OpenRouterReviewResult };

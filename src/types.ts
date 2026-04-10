@@ -111,8 +111,10 @@ export interface PluginConfig {
   workerModel?: string;      // legacy fallback alias for realtimeModel
   workerEffort?: ClaudeEffortLevel;
   reviewerReasoningEffort?: CodexReasoningEffortLevel;
-  consensusReviewerModel?: string;  // secondary reviewer model for consensus (e.g. "deepseek/deepseek-v3.2")
-  openRouterApiKey?: string;        // OpenRouter API key for secondary reviewer
+  consensusReviewerModel?: string;  // secondary reviewer model (e.g. "glm-5.1")
+  consensusReviewerApiKey?: string; // API key for secondary reviewer (Z.ai, OpenRouter, etc.)
+  consensusReviewerEndpoint?: string; // explicit endpoint URL (auto-detected if omitted)
+  openRouterApiKey?: string;        // legacy alias for consensusReviewerApiKey
   workerBackend: WorkerBackend;
   memoryV3Endpoint?: string;
   routerMaxTokens: number;
