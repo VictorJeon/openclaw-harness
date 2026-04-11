@@ -116,6 +116,7 @@ export interface PluginConfig {
   consensusReviewerEndpoint?: string; // explicit endpoint URL (auto-detected if omitted)
   openRouterApiKey?: string;        // legacy alias for consensusReviewerApiKey
   workerBackend: WorkerBackend;
+  enableLegacyTools?: boolean;
   memoryV3Endpoint?: string;
   routerMaxTokens: number;
   plannerMaxTokens: number;

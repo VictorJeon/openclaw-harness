@@ -4451,63 +4451,7 @@ var TIER0_PATTERNS = [
   // Simple rename/move
   /\b(이름|name)\s*(변경|바꿔|rename)/i
 ];
-var TIER1_KEYWORDS = [
-  "\uBC84\uADF8",
-  "bug",
-  "fix",
-  "\uACE0\uCCD0",
-  "\uC0C8 \uAE30\uB2A5",
-  "new feature",
-  "\uAE30\uB2A5 \uCD94\uAC00",
-  "\uAE30\uB2A5\uC744 \uCD94\uAC00",
-  "\uB9AC\uD329\uD1A0\uB9C1",
-  "refactor",
-  "\uD14C\uC2A4\uD2B8",
-  "test",
-  "spec",
-  "\uC5D4\uB4DC\uD3EC\uC778\uD2B8",
-  "endpoint",
-  "api",
-  "\uCEF4\uD3EC\uB10C\uD2B8",
-  "component",
-  "\uD568\uC218",
-  "function",
-  "\uB9CC\uB4E4\uC5B4",
-  "\uC2A4\uD0C0\uC77C",
-  "css",
-  "style",
-  "\uC720\uD6A8\uC131",
-  "validation",
-  "\uD074\uB798\uC2A4",
-  "class",
-  "\uAD6C\uD604",
-  "implement"
-];
-var TIER2_KEYWORDS = [
-  "\uB9C8\uC774\uADF8\uB808\uC774\uC158",
-  "migration",
-  "migrate",
-  "\uC7AC\uC791\uC131",
-  "rewrite",
-  "\uC7AC\uAD6C\uD604",
-  "\uC544\uD0A4\uD14D\uCC98",
-  "architecture",
-  "\uC804\uD658",
-  "convert",
-  "\uC804\uCCB4",
-  "\uC2DC\uC2A4\uD15C",
-  "system",
-  "\uC778\uD504\uB77C",
-  "\uBCF5\uD569",
-  "\uD1B5\uD569",
-  "integration",
-  "\uC5EC\uB7EC \uD30C\uC77C",
-  "multiple files",
-  "\uB300\uADDC\uBAA8",
-  "large scale"
-];
 async function classifyRequest(request) {
-  const normalized = request.toLowerCase().trim();
   for (const pattern of TIER0_PATTERNS) {
     if (pattern.test(request)) {
       return {
@@ -4517,78 +4461,13 @@ async function classifyRequest(request) {
       };
     }
   }
-  if (isLikelySingleFeatureWorkflow(request)) {
-    return {
-      tier: 1,
-      confidence: "keyword",
-      reason: "Single-feature workflow detected (implementation + test/docs/verify grouped as one task)"
-    };
-  }
-  let tier1Score = 0;
-  let tier2Score = 0;
-  const matchedKeywords = [];
-  for (const kw of TIER2_KEYWORDS) {
-    if (normalized.includes(kw.toLowerCase())) {
-      tier2Score++;
-      matchedKeywords.push(kw);
-    }
-  }
-  for (const kw of TIER1_KEYWORDS) {
-    if (normalized.includes(kw.toLowerCase())) {
-      tier1Score++;
-      matchedKeywords.push(kw);
-    }
-  }
-  const taskCount = countTasks(request);
-  if (tier2Score >= 2 || taskCount >= 4) {
-    return {
-      tier: 2,
-      confidence: "keyword",
-      reason: `Tier 2 keywords: [${matchedKeywords.join(", ")}], tasks: ${taskCount}`
-    };
-  }
-  if (tier1Score >= 1) {
-    return {
-      tier: taskCount >= 2 ? 2 : 1,
-      confidence: "keyword",
-      reason: `Tier 1 keywords: [${matchedKeywords.join(", ")}], tasks: ${taskCount}`
-    };
-  }
-  if (taskCount >= 2) {
-    return {
-      tier: taskCount >= 4 ? 2 : 1,
-      confidence: "keyword",
-      reason: `Multiple tasks detected: ${taskCount}`
-    };
-  }
   const llmResult = await classifyWithLlm(request);
   if (llmResult) return llmResult;
-  if (normalized.length > 200) {
-    return {
-      tier: 2,
-      confidence: "fallback",
-      reason: `Long ambiguous request (${normalized.length} chars), LLM unavailable, heuristic chose tier 2`
-    };
-  }
   return {
     tier: 1,
     confidence: "fallback",
-    reason: "No strong signals, LLM unavailable \u2014 heuristic defaulted to tier 1"
+    reason: "LLM classification unavailable \u2014 defaulted to tier 1"
   };
-}
-function countTasks(request) {
-  if (isLikelySingleFeatureWorkflow(request)) {
-    return 1;
-  }
-  const numbered = request.match(/(?:^|\n)\s*\d+[.)]/g);
-  if (numbered && numbered.length >= 2) return numbered.length;
-  const bullets = request.match(/(?:^|\n)\s*[-•*]\s+/g);
-  if (bullets && bullets.length >= 2) return bullets.length;
-  const conjunctions = request.match(/[,，]\s*(?:그리고|하고|and|also|또)/gi);
-  if (conjunctions) return conjunctions.length + 1;
-  const commaSegments = request.split(/[,，]/).filter((s) => s.trim().length > 10);
-  if (commaSegments.length >= 3) return commaSegments.length;
-  return 0;
 }
 var LLM_ROUTER_PROMPT = `You are a task complexity classifier. Given a coding task request, classify it as exactly one tier:
 
@@ -4656,20 +4535,6 @@ function parseLlmRouterOutput(output) {
   } catch {
     return null;
   }
-}
-function isLikelySingleFeatureWorkflow(request) {
-  const normalized = request.toLowerCase();
-  if (/(migration|migrate|rewrite|architecture|system|integration|infra|multiple files|large scale|마이그레이션|재작성|아키텍처|시스템|통합|인프라|여러 파일|대규모)/i.test(request)) {
-    return false;
-  }
-  const explicitFiles = request.match(/[\w\-./]+\.\w{1,5}/g) ?? [];
-  if (explicitFiles.length > 3) {
-    return false;
-  }
-  const hasImplementation = /(create|add|update|modify|implement|write|build|make|생성|추가|수정|구현|작성|만들)/i.test(request);
-  const hasSupportSteps = /(readme|pytest|test|verify|validation|commit|usage|example|readable|minimal|simple|문서|테스트|검증|커밋|예시|간단|최소)/i.test(request);
-  const hasMultiAreaSignals = /(backend and frontend|frontend and backend|api and ui|여러 서비스|여러 컴포넌트|서로 다른 모듈)/i.test(normalized);
-  return hasImplementation && hasSupportSteps && !hasMultiAreaSignals;
 }
 
 // src/planner.ts

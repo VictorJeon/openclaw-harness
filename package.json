@@ -22,8 +22,10 @@
   },
   "devDependencies": {
     "@sinclair/typebox": "^0.34.48",
+    "@types/node": "^25.6.0",
     "esbuild": "^0.27.3",
-    "nanoid": "^3.3.7"
+    "nanoid": "^3.3.7",
+    "typescript": "^6.0.2"
   },
   "keywords": [
     "openclaw",
