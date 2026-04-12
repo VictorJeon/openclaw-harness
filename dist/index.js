@@ -6772,6 +6772,10 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
       escalated: false
     };
   } catch (err) {
+    console.error(
+      `[harness] executeTask threw for task=${task.id}, plan=${plan.id}: ${err?.message ?? String(err)}
+${err?.stack ?? "(no stack)"}`
+    );
     delete checkpoint.inFlightSince;
     updateTaskStatus(checkpoint, task.id, "failed", workdir);
     const detailedError = `${err.message}

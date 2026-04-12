@@ -806,6 +806,13 @@ async function executeTask(
     };
 
   } catch (err: any) {
+    // Log the actual error so we can diagnose silent task failures.
+    // Previously this catch swallowed errors into the return value, making it
+    // impossible to tell why a task flipped to "failed" after the worker
+    // successfully completed.
+    console.error(
+      `[harness] executeTask threw for task=${task.id}, plan=${plan.id}: ${err?.message ?? String(err)}\n${err?.stack ?? "(no stack)"}`,
+    );
     delete checkpoint.inFlightSince; // release ownership on failure too
     updateTaskStatus(checkpoint, task.id, "failed", workdir);
     const detailedError = `${err.message}\n${err.stack ?? ""}`;
