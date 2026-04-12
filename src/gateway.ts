@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { getSessionManager, pluginConfig, formatSessionListing, formatDuration, formatStats, resolveOriginChannel } from "./shared";
@@ -7,6 +8,14 @@ import type { CheckpointData } from "./types";
 // Lazy reference to the harness_execute tool factory. Set during registerGatewayMethods
 // so the gateway method can invoke the tool directly without going through an agent.
 let harnessExecuteFactory: ((ctx: any) => any) | null = null;
+
+// In-flight dedup: tracks running harness.execute background tasks by request hash.
+// Prevents duplicate execution when the gateway CLI retries after a pipe signal.
+const inFlightExecutions = new Map<string, { startedAt: number; planId?: string }>();
+
+function executionKey(request: string, workdir: string): string {
+  return createHash("sha256").update(`${request}|${workdir}`).digest("hex").slice(0, 16);
+}
 
 export function setHarnessExecuteFactory(factory: (ctx: any) => any): void {
   harnessExecuteFactory = factory;
@@ -50,6 +59,22 @@ export function registerGatewayMethods(api: any): void {
       messageChannel: params.channel ?? pluginConfig.fallbackChannel,
     };
 
+    // Dedup guard: reject if the same request+workdir is already running in background.
+    // This prevents duplicate execution when the CLI retries after a pipe signal (exit 144).
+    const dedupKey = executionKey(params.request, ctx.workspaceDir);
+    const existing = inFlightExecutions.get(dedupKey);
+    if (existing) {
+      const elapsedMin = Math.round((Date.now() - existing.startedAt) / 60000);
+      console.log(`[harness.execute] Duplicate request rejected (key=${dedupKey}, running for ${elapsedMin}min, plan=${existing.planId ?? "?"})`);
+      return respond(true, {
+        status: "already_running",
+        message: `Harness execution already in progress (${elapsedMin}min). Use harness.kill to stop it first.`,
+        planId: existing.planId,
+      });
+    }
+
+    inFlightExecutions.set(dedupKey, { startedAt: Date.now() });
+
     // Respond IMMEDIATELY — the entire pipeline (including planner) runs
     // in background. This prevents WebSocket timeout on long planner calls.
     respond(true, { status: "accepted", message: "Harness execution started. Results will be pushed to channel." });
@@ -66,6 +91,8 @@ export function registerGatewayMethods(api: any): void {
         });
       } catch (err: any) {
         console.error(`[harness.execute] Gateway RPC background error: ${err?.message ?? String(err)}`);
+      } finally {
+        inFlightExecutions.delete(dedupKey);
       }
     })();
   });

@@ -8916,10 +8916,15 @@ function registerClaudeStatsCommand(api) {
 }
 
 // src/gateway.ts
+var import_crypto4 = require("crypto");
 var import_fs8 = require("fs");
 var import_path8 = require("path");
 init_checkpoint();
 var harnessExecuteFactory = null;
+var inFlightExecutions = /* @__PURE__ */ new Map();
+function executionKey(request, workdir) {
+  return (0, import_crypto4.createHash)("sha256").update(`${request}|${workdir}`).digest("hex").slice(0, 16);
+}
 function setHarnessExecuteFactory(factory) {
   harnessExecuteFactory = factory;
 }
@@ -8937,6 +8942,18 @@ function registerGatewayMethods(api) {
       workspaceDir: params.workdir ?? pluginConfig.defaultWorkdir ?? process.cwd(),
       messageChannel: params.channel ?? pluginConfig.fallbackChannel
     };
+    const dedupKey = executionKey(params.request, ctx.workspaceDir);
+    const existing = inFlightExecutions.get(dedupKey);
+    if (existing) {
+      const elapsedMin = Math.round((Date.now() - existing.startedAt) / 6e4);
+      console.log(`[harness.execute] Duplicate request rejected (key=${dedupKey}, running for ${elapsedMin}min, plan=${existing.planId ?? "?"})`);
+      return respond(true, {
+        status: "already_running",
+        message: `Harness execution already in progress (${elapsedMin}min). Use harness.kill to stop it first.`,
+        planId: existing.planId
+      });
+    }
+    inFlightExecutions.set(dedupKey, { startedAt: Date.now() });
     respond(true, { status: "accepted", message: "Harness execution started. Results will be pushed to channel." });
     void (async () => {
       try {
@@ -8950,6 +8967,8 @@ function registerGatewayMethods(api) {
         });
       } catch (err) {
         console.error(`[harness.execute] Gateway RPC background error: ${err?.message ?? String(err)}`);
+      } finally {
+        inFlightExecutions.delete(dedupKey);
       }
     })();
   });
