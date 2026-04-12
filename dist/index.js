@@ -8925,8 +8925,9 @@ function registerGatewayMethods(api) {
     if (!params?.request) {
       return respond(false, { error: "Missing required parameter: request" });
     }
+    const resolvedAgentId = params.agentId && params.agentId !== "gateway" ? params.agentId : process.env.OPENCLAW_NOTIFY_AGENT_DEFAULT || "nova";
     const ctx = {
-      agentId: params.agentId ?? "gateway",
+      agentId: resolvedAgentId,
       workspaceDir: params.workdir ?? pluginConfig.defaultWorkdir ?? process.cwd(),
       messageChannel: params.channel ?? pluginConfig.fallbackChannel
     };

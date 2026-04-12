@@ -36,8 +36,16 @@ export function registerGatewayMethods(api: any): void {
       return respond(false, { error: "Missing required parameter: request" });
     }
 
+    // agentId must be a real OpenClaw agent (not "gateway") — cc-plan-review.sh
+    // uses it as the review agent target for `openclaw agent -m`. "gateway" is
+    // not a real agent and produces empty responses, causing plan review to fail.
+    // Default to the OPENCLAW_NOTIFY_AGENT_DEFAULT env or "nova".
+    const resolvedAgentId = params.agentId && params.agentId !== "gateway"
+      ? params.agentId
+      : process.env.OPENCLAW_NOTIFY_AGENT_DEFAULT || "nova";
+
     const ctx = {
-      agentId: params.agentId ?? "gateway",
+      agentId: resolvedAgentId,
       workspaceDir: params.workdir ?? pluginConfig.defaultWorkdir ?? process.cwd(),
       messageChannel: params.channel ?? pluginConfig.fallbackChannel,
     };
