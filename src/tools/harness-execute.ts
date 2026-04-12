@@ -1034,16 +1034,21 @@ function sanitizeCodexPromptOutput(stdout: string): string {
 
 function realtimeCheckpointReviewModeForStatus(
   status: string | null | undefined,
-  stateDir: string,
+  _stateDir: string,
   _goal: "round-complete" | "terminal",
 ): RealtimeCheckpointReviewMode | null {
-  if (status === "plan_waiting") {
-    const currentRound = detectLatestRealtimeRound(stateDir);
-    if (hasImplementationReviewArtifactForRound(stateDir, currentRound)) {
-      return null;
-    }
-    return "embedded-plan";
-  }
+  // Embedded plan review is disabled. It relied on runEmbeddedPiAgent which
+  // injects uncontrollable workspace/agent bootstrap context, causing
+  // persistent "Context overflow: prompt too large" failures regardless of
+  // workspaceDir/agentDir isolation attempts. Layer 1 review
+  // (cc-implementation-review.sh → codex) is the real correctness gate and
+  // runs every round. Removing embedded plan review follows the same logic
+  // as the earlier Layer 2 removal: if we can't make it reliable, it's
+  // better absent than broken.
+  //
+  // When plan_waiting fires, the harness now lets the feedback file mechanism
+  // handle flow control (cc-plan-review.sh SSH-back path still triggers
+  // independently from claude-realtime.sh if configured).
   return null;
 }
 

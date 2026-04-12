@@ -6915,14 +6915,7 @@ ${output}` : ""}`);
     `[harness] Tier 2 sync pull complete: workdir=${workdir}, remote=${REALTIME_REMOTE_HOST}${output ? `, output=${output}` : ""}`
   );
 }
-function realtimeCheckpointReviewModeForStatus(status, stateDir, _goal) {
-  if (status === "plan_waiting") {
-    const currentRound = detectLatestRealtimeRound(stateDir);
-    if (hasImplementationReviewArtifactForRound(stateDir, currentRound)) {
-      return null;
-    }
-    return "embedded-plan";
-  }
+function realtimeCheckpointReviewModeForStatus(status, _stateDir, _goal) {
   return null;
 }
 function reviewArtifactPrefix(kind, round) {
@@ -7332,10 +7325,6 @@ function parseReviewVerdictFromSource(path) {
   if (!text) return null;
   const match = text.match(/^verdict=(.+)$/m);
   return match?.[1]?.trim() || null;
-}
-function hasImplementationReviewArtifactForRound(stateDir, round) {
-  if (round <= 0) return false;
-  return (0, import_fs7.existsSync)((0, import_path7.join)(stateDir, `implementation-review-round-${round}.source.txt`));
 }
 function collectRealtimeReviewDiagnostics(stateDir) {
   const implementationSources = listRealtimeArtifacts(stateDir, /^implementation-review-round-\d+\.source\.txt$/);
