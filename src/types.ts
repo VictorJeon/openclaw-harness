@@ -214,6 +214,13 @@ export interface CheckpointData {
    * does not loop forever.
    */
   resumeCount?: number;
+  /**
+   * ISO timestamp set by the harness background task when it actively owns
+   * this checkpoint. Prevents cleanup GC's reconcileStaleCheckpoint from
+   * resetting in-progress tasks while the owning process is still running
+   * (remote workers appear "dead" to local PID checks).
+   */
+  inFlightSince?: string;
 }
 
 export interface HarnessRunResult {

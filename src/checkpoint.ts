@@ -199,6 +199,20 @@ function reconcileStaleCheckpoint(checkpoint: CheckpointData, workdir: string): 
   if (checkpoint.status !== "running") return checkpoint;
   if (checkpointHasLiveSession(checkpoint)) return checkpoint;
 
+  // If a harness background task currently owns this checkpoint, do NOT
+  // reconcile. The owner sets inFlightSince when it starts and clears it
+  // when it finishes. Remote workers appear "dead" to local PID checks
+  // (checkpointHasLiveSession), but the owning background task is still
+  // actively awaiting them. Reconciling here would reset in-progress tasks
+  // to pending, corrupting the owner's in-memory state.
+  // Allow reconcile only if inFlightSince is older than 30 min (stale owner).
+  if (checkpoint.inFlightSince) {
+    const flightAge = Date.now() - Date.parse(checkpoint.inFlightSince);
+    if (!isNaN(flightAge) && flightAge < 30 * 60 * 1000) {
+      return checkpoint; // owned — hands off
+    }
+  }
+
   // Worker/reviewer processes are dead (gateway restart, crash, stream hang, …).
   // Reset in-progress / in-review tasks to pending so the next harness.execute
   // with the same request can pick them up via findRecoverableCheckpoint.

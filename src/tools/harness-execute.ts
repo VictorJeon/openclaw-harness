@@ -681,6 +681,9 @@ async function executeTask(
     resetCheckpointTaskForRetry(checkpoint, task.id);
 
     // --- Worker phase ---
+    // Mark checkpoint as actively owned by this background task so cleanup
+    // GC's reconcile doesn't reset our in-progress tasks while we're running.
+    checkpoint.inFlightSince = new Date().toISOString();
     updateTaskStatus(checkpoint, task.id, "in-progress", workdir);
 
     const workerPrompt = buildWorkerPrompt(task, plan);
@@ -787,6 +790,7 @@ async function executeTask(
     // --- Worker done → task complete ---
     // Review is handled by the worker-side cc-implementation-review.sh (Layer 1).
     // Worker reaching "done" means the Codex review already passed.
+    delete checkpoint.inFlightSince; // release ownership before final save
     updateTaskStatus(checkpoint, task.id, "completed", workdir, {
       reviewPassed: true,
       reviewLoop: totalReviewLoops(0),
@@ -802,6 +806,7 @@ async function executeTask(
     };
 
   } catch (err: any) {
+    delete checkpoint.inFlightSince; // release ownership on failure too
     updateTaskStatus(checkpoint, task.id, "failed", workdir);
     const detailedError = `${err.message}\n${err.stack ?? ""}`;
     return {
@@ -1110,13 +1115,21 @@ async function waitForRealtimeTerminalState(
       : timeSinceLastHbeat >= HEARTBEAT_INTERVAL_MS;
 
     if (heartbeatDue) {
-      // Touch the checkpoint file so stale cleanup knows this plan is alive
-      // (cleanup checks filesystem mtime, not just JSON lastUpdated).
+      // Touch the checkpoint file so stale cleanup knows this plan is alive.
+      // Also refresh inFlightSince so reconcile's 30-min staleness check
+      // doesn't expire while we're still actively polling.
       try {
         const cpPath = join("/tmp", "harness", plan.id, "checkpoint.json");
         if (existsSync(cpPath)) {
           const now = new Date();
           require("fs").utimesSync(cpPath, now, now);
+          // Refresh inFlightSince in the JSON too
+          try {
+            const raw = readFileSync(cpPath, "utf-8");
+            const cpDisk = JSON.parse(raw);
+            cpDisk.inFlightSince = now.toISOString();
+            writeFileSync(cpPath, JSON.stringify(cpDisk, null, 2));
+          } catch { /* best-effort */ }
         }
       } catch { /* best-effort */ }
 

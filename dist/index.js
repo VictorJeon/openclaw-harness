@@ -164,6 +164,12 @@ function checkpointHasLiveSession(checkpoint) {
 function reconcileStaleCheckpoint(checkpoint, workdir) {
   if (checkpoint.status !== "running") return checkpoint;
   if (checkpointHasLiveSession(checkpoint)) return checkpoint;
+  if (checkpoint.inFlightSince) {
+    const flightAge = Date.now() - Date.parse(checkpoint.inFlightSince);
+    if (!isNaN(flightAge) && flightAge < 30 * 60 * 1e3) {
+      return checkpoint;
+    }
+  }
   const resumableIds = new Set(
     checkpoint.tasks.filter((task) => task.status === "in-progress" || task.status === "in-review").map((task) => task.id)
   );
@@ -6670,6 +6676,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
   const totalReviewLoops = (outerLoops) => outerLoops + (isRealtimeBackend ? getRealtimeImplementationReviewLoops(workerSessionId) : 0);
   try {
     resetCheckpointTaskForRetry(checkpoint, task.id);
+    checkpoint.inFlightSince = (/* @__PURE__ */ new Date()).toISOString();
     updateTaskStatus(checkpoint, task.id, "in-progress", workdir);
     const workerPrompt = buildWorkerPrompt(task, plan);
     let workerResult = null;
@@ -6750,6 +6757,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
     } catch (syncErr) {
       console.warn(`[harness] Post-worker sync pull failed (non-fatal): task=${task.id}, error=${syncErr?.message}`);
     }
+    delete checkpoint.inFlightSince;
     updateTaskStatus(checkpoint, task.id, "completed", workdir, {
       reviewPassed: true,
       reviewLoop: totalReviewLoops(0),
@@ -6764,6 +6772,7 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
       escalated: false
     };
   } catch (err) {
+    delete checkpoint.inFlightSince;
     updateTaskStatus(checkpoint, task.id, "failed", workdir);
     const detailedError = `${err.message}
 ${err.stack ?? ""}`;
@@ -6949,6 +6958,13 @@ async function waitForRealtimeTerminalState(stateDir, jobId, task, plan, ctx, wo
         if ((0, import_fs7.existsSync)(cpPath)) {
           const now = /* @__PURE__ */ new Date();
           require("fs").utimesSync(cpPath, now, now);
+          try {
+            const raw = (0, import_fs7.readFileSync)(cpPath, "utf-8");
+            const cpDisk = JSON.parse(raw);
+            cpDisk.inFlightSince = now.toISOString();
+            (0, import_fs7.writeFileSync)(cpPath, JSON.stringify(cpDisk, null, 2));
+          } catch {
+          }
         }
       } catch {
       }
