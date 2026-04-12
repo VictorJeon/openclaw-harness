@@ -6744,6 +6744,12 @@ async function executeTask(task, plan, workdir, budgetUsd, ctx, checkpoint) {
         error: "Worker session did not produce a result"
       };
     }
+    try {
+      await syncRealtimeWorktreeFromRemote(workdir);
+      console.log(`[harness] Post-worker sync pull complete: task=${task.id}`);
+    } catch (syncErr) {
+      console.warn(`[harness] Post-worker sync pull failed (non-fatal): task=${task.id}, error=${syncErr?.message}`);
+    }
     updateTaskStatus(checkpoint, task.id, "completed", workdir, {
       reviewPassed: true,
       reviewLoop: totalReviewLoops(0),

@@ -769,11 +769,24 @@ async function executeTask(
       };
     }
 
+    // --- Worker done → sync back before marking complete ---
+    // Pull the worker's changes from Hetzner back to the local isolated workspace.
+    // Without this, the next sequential task's git-sync push sends the stale
+    // pre-task-N state to Hetzner, force-overwriting task-N's commits and
+    // corrupting the worktree (the "unable to read tree" crash on task transitions).
+    try {
+      await syncRealtimeWorktreeFromRemote(workdir);
+      console.log(`[harness] Post-worker sync pull complete: task=${task.id}`);
+    } catch (syncErr: any) {
+      // Non-fatal: task result is already on Hetzner. Log and continue —
+      // next task's push may still conflict, but that's better than aborting
+      // a successfully completed task.
+      console.warn(`[harness] Post-worker sync pull failed (non-fatal): task=${task.id}, error=${syncErr?.message}`);
+    }
+
     // --- Worker done → task complete ---
     // Review is handled by the worker-side cc-implementation-review.sh (Layer 1).
     // Worker reaching "done" means the Codex review already passed.
-    // No Layer 2 harness self-review — it can't fix code after worker exits,
-    // so it only creates false-positive escalation loops.
     updateTaskStatus(checkpoint, task.id, "completed", workdir, {
       reviewPassed: true,
       reviewLoop: totalReviewLoops(0),
