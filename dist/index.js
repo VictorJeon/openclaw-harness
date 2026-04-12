@@ -6848,7 +6848,7 @@ async function launchRealtimeJob(spec, workdir, jobId, model, effort, notifyAgen
     args,
     workdir,
     REALTIME_LAUNCH_TIMEOUT_MS,
-    { [REALTIME_EMBEDDED_PLAN_REVIEW_ENV]: "1" }
+    { [REALTIME_EMBEDDED_PLAN_REVIEW_ENV]: "0" }
   );
   const combinedOutput = [launch.stdout, launch.stderr].filter(Boolean).join("\n").trim();
   const stateDir = parseRealtimeStateDir(combinedOutput, jobId);
@@ -6904,7 +6904,7 @@ async function syncRealtimeWorktreeFromRemote(workdir) {
     [GIT_SYNC_SCRIPT_PATH, "pull", workdir, "--remote-host", REALTIME_REMOTE_HOST],
     workdir,
     REALTIME_PULL_TIMEOUT_MS,
-    { [REALTIME_EMBEDDED_PLAN_REVIEW_ENV]: "1" }
+    { [REALTIME_EMBEDDED_PLAN_REVIEW_ENV]: "0" }
   );
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   if (result.exitCode !== 0) {
