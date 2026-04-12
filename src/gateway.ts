@@ -1,4 +1,8 @@
+import { existsSync, readdirSync, readFileSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
 import { getSessionManager, pluginConfig, formatSessionListing, formatDuration, formatStats, resolveOriginChannel } from "./shared";
+import { findRecoverableCheckpoint, saveCheckpoint } from "./checkpoint";
+import type { CheckpointData } from "./types";
 
 // Lazy reference to the harness_execute tool factory. Set during registerGatewayMethods
 // so the gateway method can invoke the tool directly without going through an agent.
@@ -56,6 +60,75 @@ export function registerGatewayMethods(api: any): void {
         console.error(`[harness.execute] Gateway RPC background error: ${err?.message ?? String(err)}`);
       }
     })();
+  });
+
+  // ── harness.kill — abort a running harness plan ─────────────────
+  // Finds the running checkpoint for the given planId, kills the remote
+  // worker process tree (via SSH), writes "ABORT" to the feedback file,
+  // and marks the checkpoint as failed. Callable via:
+  //   openclaw gateway call harness.kill --params '{"planId":"plan-..."}'
+  api.registerGatewayMethod("harness.kill", ({ respond, params }: any) => {
+    const planId = params?.planId as string | undefined;
+    if (!planId) {
+      return respond(false, { error: "Missing required parameter: planId" });
+    }
+
+    const checkpointDir = join("/tmp", "harness", planId);
+    const cpPath = join(checkpointDir, "checkpoint.json");
+    if (!existsSync(cpPath)) {
+      return respond(false, { error: `Checkpoint not found: ${planId}` });
+    }
+
+    try {
+      const cp: CheckpointData = JSON.parse(readFileSync(cpPath, "utf-8"));
+
+      // Find and kill live worker processes
+      const stateRoot = join("/tmp", "claude-realtime");
+      const killedJobs: string[] = [];
+      for (const [taskId, session] of Object.entries(cp.sessions ?? {})) {
+        const jobId = session.worker;
+        if (!jobId) continue;
+        const stateDir = join(stateRoot, jobId);
+        // Write ABORT to feedback so claude-realtime.sh exits on next poll
+        try {
+          writeFileSync(join(stateDir, "feedback"), "ABORT\n", "utf8");
+        } catch { /* best-effort */ }
+        // Write abort status
+        try {
+          writeFileSync(join(stateDir, "status"), "aborted\n", "utf8");
+        } catch { /* best-effort */ }
+        // Kill the PID if local
+        try {
+          const pidStr = readFileSync(join(stateDir, "pid"), "utf8").trim();
+          const pid = parseInt(pidStr, 10);
+          if (pid > 0) {
+            process.kill(pid, "SIGTERM");
+            killedJobs.push(`${jobId} (pid ${pid})`);
+          }
+        } catch { /* best-effort — might be remote */ }
+        killedJobs.push(jobId);
+      }
+
+      // Mark checkpoint as failed
+      cp.status = "failed";
+      cp.tasks = cp.tasks.map((t) => {
+        if (t.status === "in-progress" || t.status === "in-review") {
+          return { ...t, status: "failed", reviewPassed: false };
+        }
+        return t;
+      });
+      cp.lastUpdated = new Date().toISOString();
+      saveCheckpoint(cp, cp.workdir ?? "");
+
+      respond(true, {
+        planId,
+        status: "killed",
+        killedJobs,
+        message: `Plan ${planId} aborted. ${killedJobs.length} job(s) signaled.`,
+      });
+    } catch (err: any) {
+      respond(false, { error: `Failed to kill plan: ${err?.message ?? String(err)}` });
+    }
   });
 
   // ── claude-code.sessions ────────────────────────────────────────

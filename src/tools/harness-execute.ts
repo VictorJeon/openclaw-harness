@@ -1257,12 +1257,11 @@ async function runEmbeddedRealtimePlanReview(params: {
   const agentId = params.ctx.agentId ?? params.ctx.agentAccountId ?? "main";
   const cfg = await runtime.config.loadConfig();
 
-  let agentDir: string | undefined;
-  try {
-    agentDir = runtime.agent.resolveAgentDir(cfg, agentId);
-  } catch {
-    agentDir = undefined;
-  }
+  // Do NOT resolve the real agent dir for plan reviews. Just like the empty
+  // reviewWorkspaceDir below, this prevents runEmbeddedPiAgent from injecting
+  // the agent's full plugin/hooks/settings tree into the prompt bootstrap.
+  // Plan review only needs the prompt we build, not the agent's environment.
+  const agentDir: string | undefined = undefined;
 
   // Plan review must NOT use the calling agent's workspace as the bootstrap
   // root: OpenClaw's runEmbeddedPiAgent auto-injects file-tree context from
@@ -1495,7 +1494,11 @@ function parseEmbeddedPlanReviewResponse(rawText: string): { verdict: PlanReview
 }
 
 function isTransientEmbeddedReviewError(message: string): boolean {
-  return /(temporarily overloaded|overloaded|rate limit|try again in a moment|timeout|timed out|temporarily unavailable|context overflow|prompt too large)/i.test(message);
+  // Context overflow / prompt too large are NOT transient — retrying the same
+  // prompt always fails. They need compact retry or prompt reduction, not a
+  // naive backoff-and-retry.
+  if (/context overflow|prompt too large/i.test(message)) return false;
+  return /(temporarily overloaded|overloaded|rate limit|try again in a moment|timeout|timed out|temporarily unavailable)/i.test(message);
 }
 
 function collectEmbeddedPayloadText(

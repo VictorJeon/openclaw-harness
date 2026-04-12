@@ -7085,12 +7085,7 @@ async function runEmbeddedRealtimePlanReview(params) {
   }
   const agentId = params.ctx.agentId ?? params.ctx.agentAccountId ?? "main";
   const cfg = await runtime.config.loadConfig();
-  let agentDir;
-  try {
-    agentDir = runtime.agent.resolveAgentDir(cfg, agentId);
-  } catch {
-    agentDir = void 0;
-  }
+  const agentDir = void 0;
   const latestResult = readLatestRealtimeResult(params.stateDir);
   let retryReason = "";
   const embeddedReviewerTarget = resolveEmbeddedReviewerProviderAndModel(
@@ -7253,7 +7248,8 @@ function parseEmbeddedPlanReviewResponse(rawText) {
   return { verdict, body };
 }
 function isTransientEmbeddedReviewError(message) {
-  return /(temporarily overloaded|overloaded|rate limit|try again in a moment|timeout|timed out|temporarily unavailable|context overflow|prompt too large)/i.test(message);
+  if (/context overflow|prompt too large/i.test(message)) return false;
+  return /(temporarily overloaded|overloaded|rate limit|try again in a moment|timeout|timed out|temporarily unavailable)/i.test(message);
 }
 function collectEmbeddedPayloadText(payloads) {
   return (payloads ?? []).map((payload) => payload?.text ?? "").filter(Boolean).join("\n").trim();
@@ -8925,6 +8921,9 @@ function registerClaudeStatsCommand(api) {
 }
 
 // src/gateway.ts
+var import_fs8 = require("fs");
+var import_path8 = require("path");
+init_checkpoint();
 var harnessExecuteFactory = null;
 function setHarnessExecuteFactory(factory) {
   harnessExecuteFactory = factory;
@@ -8957,6 +8956,62 @@ function registerGatewayMethods(api) {
         console.error(`[harness.execute] Gateway RPC background error: ${err?.message ?? String(err)}`);
       }
     })();
+  });
+  api.registerGatewayMethod("harness.kill", ({ respond, params }) => {
+    const planId = params?.planId;
+    if (!planId) {
+      return respond(false, { error: "Missing required parameter: planId" });
+    }
+    const checkpointDir2 = (0, import_path8.join)("/tmp", "harness", planId);
+    const cpPath = (0, import_path8.join)(checkpointDir2, "checkpoint.json");
+    if (!(0, import_fs8.existsSync)(cpPath)) {
+      return respond(false, { error: `Checkpoint not found: ${planId}` });
+    }
+    try {
+      const cp = JSON.parse((0, import_fs8.readFileSync)(cpPath, "utf-8"));
+      const stateRoot = (0, import_path8.join)("/tmp", "claude-realtime");
+      const killedJobs = [];
+      for (const [taskId, session] of Object.entries(cp.sessions ?? {})) {
+        const jobId = session.worker;
+        if (!jobId) continue;
+        const stateDir = (0, import_path8.join)(stateRoot, jobId);
+        try {
+          (0, import_fs8.writeFileSync)((0, import_path8.join)(stateDir, "feedback"), "ABORT\n", "utf8");
+        } catch {
+        }
+        try {
+          (0, import_fs8.writeFileSync)((0, import_path8.join)(stateDir, "status"), "aborted\n", "utf8");
+        } catch {
+        }
+        try {
+          const pidStr = (0, import_fs8.readFileSync)((0, import_path8.join)(stateDir, "pid"), "utf8").trim();
+          const pid = parseInt(pidStr, 10);
+          if (pid > 0) {
+            process.kill(pid, "SIGTERM");
+            killedJobs.push(`${jobId} (pid ${pid})`);
+          }
+        } catch {
+        }
+        killedJobs.push(jobId);
+      }
+      cp.status = "failed";
+      cp.tasks = cp.tasks.map((t) => {
+        if (t.status === "in-progress" || t.status === "in-review") {
+          return { ...t, status: "failed", reviewPassed: false };
+        }
+        return t;
+      });
+      cp.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+      saveCheckpoint(cp, cp.workdir ?? "");
+      respond(true, {
+        planId,
+        status: "killed",
+        killedJobs,
+        message: `Plan ${planId} aborted. ${killedJobs.length} job(s) signaled.`
+      });
+    } catch (err) {
+      respond(false, { error: `Failed to kill plan: ${err?.message ?? String(err)}` });
+    }
   });
   api.registerGatewayMethod("claude-code.sessions", ({ respond, params }) => {
     const sessionManager2 = getSessionManager();
@@ -9103,15 +9158,15 @@ function registerGatewayMethods(api) {
 var import_child_process6 = require("child_process");
 
 // src/session.ts
-var import_fs9 = require("fs");
+var import_fs10 = require("fs");
 var import_os8 = require("os");
-var import_path9 = require("path");
+var import_path10 = require("path");
 var import_claude_agent_sdk = require("@anthropic-ai/claude-agent-sdk");
 
 // src/git-sync-recovery.ts
-var import_fs8 = require("fs");
+var import_fs9 = require("fs");
 var import_child_process5 = require("child_process");
-var import_path8 = require("path");
+var import_path9 = require("path");
 var UNTRACKED_OVERWRITE_PATTERN = /The following untracked working tree files would be overwritten by (?:merge|checkout|switch):/i;
 var STOP_LINE_PATTERN = /Please move or remove them before you (?:merge|switch branches|checkout)\./i;
 function sanitizeTimestamp(value) {
@@ -9163,34 +9218,34 @@ function isUntracked(repoRoot, relativePath) {
   }
 }
 function safeMove(source, destination) {
-  (0, import_fs8.mkdirSync)((0, import_path8.dirname)(destination), { recursive: true });
+  (0, import_fs9.mkdirSync)((0, import_path9.dirname)(destination), { recursive: true });
   try {
-    (0, import_fs8.renameSync)(source, destination);
+    (0, import_fs9.renameSync)(source, destination);
     return;
   } catch (error) {
     if (error?.code !== "EXDEV") {
       throw error;
     }
   }
-  const stats = (0, import_fs8.lstatSync)(source);
+  const stats = (0, import_fs9.lstatSync)(source);
   if (stats.isDirectory()) {
-    (0, import_fs8.cpSync)(source, destination, { recursive: true, errorOnExist: true });
-    (0, import_fs8.rmSync)(source, { recursive: true, force: false });
+    (0, import_fs9.cpSync)(source, destination, { recursive: true, errorOnExist: true });
+    (0, import_fs9.rmSync)(source, { recursive: true, force: false });
     return;
   }
-  (0, import_fs8.cpSync)(source, destination, { errorOnExist: true });
-  (0, import_fs8.rmSync)(source, { force: false });
+  (0, import_fs9.cpSync)(source, destination, { errorOnExist: true });
+  (0, import_fs9.rmSync)(source, { force: false });
 }
 function createUniqueBackupPath(backupRoot, relativePath) {
   const normalized = relativePath.replace(/^\/+/, "");
-  let candidate = (0, import_path8.join)(backupRoot, normalized);
-  if (!(0, import_fs8.existsSync)(candidate)) return candidate;
-  const baseDir = (0, import_path8.dirname)(candidate);
+  let candidate = (0, import_path9.join)(backupRoot, normalized);
+  if (!(0, import_fs9.existsSync)(candidate)) return candidate;
+  const baseDir = (0, import_path9.dirname)(candidate);
   const fileName = candidate.slice(baseDir.length + 1);
   let index = 2;
   while (true) {
-    const next = (0, import_path8.join)(baseDir, `${fileName}.bak-${index}`);
-    if (!(0, import_fs8.existsSync)(next)) return next;
+    const next = (0, import_path9.join)(baseDir, `${fileName}.bak-${index}`);
+    if (!(0, import_fs9.existsSync)(next)) return next;
     index++;
   }
 }
@@ -9205,17 +9260,17 @@ function tryRecoverRealtimeSyncConflict(workdir, errorText) {
   const blockingPaths = extractBlockingPaths(errorText);
   if (blockingPaths.length === 0) return null;
   const verified = blockingPaths.map((relativePath) => {
-    const absolutePath = (0, import_path8.resolve)(repoRoot, relativePath);
-    const relativeToRoot = (0, import_path8.relative)(repoRoot, absolutePath);
-    if (relativeToRoot.startsWith("..") || relativeToRoot.includes(`..${import_path8.sep}`)) {
+    const absolutePath = (0, import_path9.resolve)(repoRoot, relativePath);
+    const relativeToRoot = (0, import_path9.relative)(repoRoot, absolutePath);
+    if (relativeToRoot.startsWith("..") || relativeToRoot.includes(`..${import_path9.sep}`)) {
       return null;
     }
-    if (!(0, import_fs8.existsSync)(absolutePath)) return null;
+    if (!(0, import_fs9.existsSync)(absolutePath)) return null;
     if (!isUntracked(repoRoot, relativePath)) return null;
     return { relativePath, absolutePath };
   }).filter((entry) => entry !== null);
   if (verified.length === 0) return null;
-  const backupRoot = (0, import_path8.join)(
+  const backupRoot = (0, import_path9.join)(
     repoRoot,
     ".openclaw-harness",
     "realtime-sync-conflicts",
@@ -9230,9 +9285,9 @@ function tryRecoverRealtimeSyncConflict(workdir, errorText) {
       backup: backupPath
     });
   }
-  (0, import_fs8.mkdirSync)(backupRoot, { recursive: true });
-  (0, import_fs8.writeFileSync)(
-    (0, import_path8.join)(backupRoot, "manifest.json"),
+  (0, import_fs9.mkdirSync)(backupRoot, { recursive: true });
+  (0, import_fs9.writeFileSync)(
+    (0, import_path9.join)(backupRoot, "manifest.json"),
     JSON.stringify(
       {
         recoveredAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -9261,8 +9316,8 @@ function shouldPreferClaudeCredentials(baseEnv) {
   const apiKey = (baseEnv.ANTHROPIC_API_KEY ?? "").trim();
   if (!apiKey) return false;
   const home = (baseEnv.HOME ?? "").trim() || (0, import_os8.homedir)();
-  const credentialsPath = (0, import_path9.join)(home, ".claude", ".credentials.json");
-  return (0, import_fs9.existsSync)(credentialsPath);
+  const credentialsPath = (0, import_path10.join)(home, ".claude", ".credentials.json");
+  return (0, import_fs10.existsSync)(credentialsPath);
 }
 async function withClaudeSdkAuthEnv(fn) {
   if (!shouldPreferClaudeCredentials(process.env)) {
