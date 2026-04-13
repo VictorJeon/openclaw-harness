@@ -142,6 +142,19 @@ function getPendingTasks(checkpoint) {
 }
 function isRecordedSessionAlive(sessionId) {
   if (!sessionId) return false;
+  if (sessionId.startsWith("harness-plan-")) {
+    try {
+      const statusPath = (0, import_path3.join)("/tmp", "claude-realtime", sessionId, "status");
+      if (!(0, import_fs3.existsSync)(statusPath)) {
+        return false;
+      }
+      const status = (0, import_fs3.readFileSync)(statusPath, "utf-8").trim();
+      const isTerminal = status === "done" || status === "aborted" || status === "error" || status.startsWith("error:") || status === "loop" || status === "plan_violation";
+      return !isTerminal;
+    } catch {
+      return false;
+    }
+  }
   const pidMatch = sessionId.match(/-(\d{5,})$/);
   if (!pidMatch) return true;
   const pid = Number(pidMatch[1]);

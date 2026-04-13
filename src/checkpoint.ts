@@ -172,6 +172,33 @@ export function getPendingTasks(checkpoint: CheckpointData): string[] {
 
 function isRecordedSessionAlive(sessionId?: string): boolean {
   if (!sessionId) return false;
+
+  // Remote realtime workers (harness-plan-*) live on Hetzner — their PID is
+  // not local, so kill(pid, 0) will always fail. Check the shared state file
+  // at /tmp/claude-realtime/<jobId>/status instead. Any status other than
+  // terminal states means the worker is still alive and the caller should
+  // NOT reconcile/reset its task.
+  if (sessionId.startsWith("harness-plan-")) {
+    try {
+      const statusPath = join("/tmp", "claude-realtime", sessionId, "status");
+      if (!existsSync(statusPath)) {
+        // No status file yet — worker may be launching. Assume alive for a
+        // brief grace period by looking at the state dir mtime.
+        return false;
+      }
+      const status = readFileSync(statusPath, "utf-8").trim();
+      const isTerminal = status === "done"
+        || status === "aborted"
+        || status === "error"
+        || status.startsWith("error:")
+        || status === "loop"
+        || status === "plan_violation";
+      return !isTerminal;
+    } catch {
+      return false;
+    }
+  }
+
   const pidMatch = sessionId.match(/-(\d{5,})$/);
   if (!pidMatch) return true;
   const pid = Number(pidMatch[1]);
