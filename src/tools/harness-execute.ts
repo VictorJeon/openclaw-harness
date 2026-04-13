@@ -919,7 +919,16 @@ async function waitForRealtimeCheckpoint(
   );
 
   if (terminal.status === "waiting" || terminal.status === "done") {
-    await syncRealtimeWorktreeFromRemote(workdir);
+    // Best-effort pull — runtime-generated files (data/alert_history.json,
+    // kelly_stats, etc.) can block merge if the live bot is writing to the
+    // isolated workspace concurrently. The authoritative state is on Hetzner;
+    // next task's push will overwrite local conflicts anyway. Don't abort the
+    // whole task over a pull merge conflict on untracked/runtime files.
+    try {
+      await syncRealtimeWorktreeFromRemote(workdir);
+    } catch (syncErr: any) {
+      console.warn(`[harness] Round-complete sync pull failed (non-fatal): ${syncErr?.message}`);
+    }
   }
 
   const workerResult = buildRealtimeWorkerResult(task.id, terminal.status, terminal.summary, terminal.sessionId ?? jobId);

@@ -6845,7 +6845,11 @@ async function waitForRealtimeCheckpoint(task, plan, workdir, ctx, jobId, stateD
     goal
   );
   if (terminal.status === "waiting" || terminal.status === "done") {
-    await syncRealtimeWorktreeFromRemote(workdir);
+    try {
+      await syncRealtimeWorktreeFromRemote(workdir);
+    } catch (syncErr) {
+      console.warn(`[harness] Round-complete sync pull failed (non-fatal): ${syncErr?.message}`);
+    }
   }
   const workerResult = buildRealtimeWorkerResult(task.id, terminal.status, terminal.summary, terminal.sessionId ?? jobId);
   return {
