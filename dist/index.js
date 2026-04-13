@@ -3103,10 +3103,6 @@ function setPluginConfig(config) {
     workerModel: config.workerModel,
     workerEffort: config.workerEffort,
     reviewerReasoningEffort: config.reviewerReasoningEffort,
-    consensusReviewerModel: config.consensusReviewerModel,
-    consensusReviewerApiKey: config.consensusReviewerApiKey,
-    consensusReviewerEndpoint: config.consensusReviewerEndpoint,
-    openRouterApiKey: config.openRouterApiKey,
     workerBackend: config.workerBackend ?? "remote-realtime",
     memoryV3Endpoint: config.memoryV3Endpoint,
     routerMaxTokens: config.routerMaxTokens ?? 500,
@@ -5521,42 +5517,6 @@ function buildReviewRequest(task, workerResult, originalRequest, state) {
   return buildReviewPrompt(task, workerResult, originalRequest, previousGaps);
 }
 
-// src/reviewer-runner.ts
-var import_child_process2 = require("child_process");
-var import_fs5 = require("fs");
-var import_os5 = require("os");
-var import_path5 = require("path");
-
-// node_modules/nanoid/index.js
-var import_crypto2 = __toESM(require("crypto"), 1);
-
-// node_modules/nanoid/url-alphabet/index.js
-var urlAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
-
-// node_modules/nanoid/index.js
-var POOL_SIZE_MULTIPLIER = 128;
-var pool;
-var poolOffset;
-var fillPool = (bytes) => {
-  if (!pool || pool.length < bytes) {
-    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
-    import_crypto2.default.randomFillSync(pool);
-    poolOffset = 0;
-  } else if (poolOffset + bytes > pool.length) {
-    import_crypto2.default.randomFillSync(pool);
-    poolOffset = 0;
-  }
-  poolOffset += bytes;
-};
-var nanoid = (size = 21) => {
-  fillPool(size |= 0);
-  let id = "";
-  for (let i = poolOffset - size; i < poolOffset; i++) {
-    id += urlAlphabet[pool[i] & 63];
-  }
-  return id;
-};
-
 // src/model-resolution.ts
 var import_fs4 = require("fs");
 var import_os4 = require("os");
@@ -5672,6 +5632,42 @@ function resolveModelAlias(model) {
   const canonical = trimmed.includes("/") ? trimmed : aliases.get(trimmed.toLowerCase()) ?? trimmed;
   return normalizeClaudeLaunchModel(canonical);
 }
+
+// src/reviewer-runner.ts
+var import_child_process2 = require("child_process");
+var import_fs5 = require("fs");
+var import_os5 = require("os");
+var import_path5 = require("path");
+
+// node_modules/nanoid/index.js
+var import_crypto2 = __toESM(require("crypto"), 1);
+
+// node_modules/nanoid/url-alphabet/index.js
+var urlAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
+
+// node_modules/nanoid/index.js
+var POOL_SIZE_MULTIPLIER = 128;
+var pool;
+var poolOffset;
+var fillPool = (bytes) => {
+  if (!pool || pool.length < bytes) {
+    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
+    import_crypto2.default.randomFillSync(pool);
+    poolOffset = 0;
+  } else if (poolOffset + bytes > pool.length) {
+    import_crypto2.default.randomFillSync(pool);
+    poolOffset = 0;
+  }
+  poolOffset += bytes;
+};
+var nanoid = (size = 21) => {
+  fillPool(size |= 0);
+  let id = "";
+  for (let i = poolOffset - size; i < poolOffset; i++) {
+    id += urlAlphabet[pool[i] & 63];
+  }
+  return id;
+};
 
 // src/reviewer-runner.ts
 function normalizeCodexReasoningEffort(level) {
@@ -5865,166 +5861,6 @@ function readCodexOutput(outputFile, stdout) {
     if (saved) return saved;
   }
   return stdout.trim();
-}
-
-// src/reviewer-openrouter.ts
-var DEFAULT_TIMEOUT_MS2 = 12e4;
-var OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
-var ZAI_CODING_ENDPOINT = "https://api.z.ai/api/coding/paas/v4/chat/completions";
-function resolveEndpoint() {
-  if (pluginConfig.consensusReviewerEndpoint) {
-    return pluginConfig.consensusReviewerEndpoint;
-  }
-  const key = pluginConfig.consensusReviewerApiKey ?? pluginConfig.openRouterApiKey ?? "";
-  if (key.startsWith("sk-or-")) return OPENROUTER_ENDPOINT;
-  return ZAI_CODING_ENDPOINT;
-}
-function resolveApiKey() {
-  return pluginConfig.consensusReviewerApiKey ?? pluginConfig.openRouterApiKey;
-}
-async function runReviewerWithSecondaryApi(options) {
-  const apiKey = resolveApiKey();
-  if (!apiKey) {
-    throw new Error("No API key configured for secondary reviewer (consensusReviewerApiKey or openRouterApiKey)");
-  }
-  const endpoint = resolveEndpoint();
-  const model = options.model ?? pluginConfig.consensusReviewerModel ?? "glm-5.1";
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS2;
-  const body = JSON.stringify({
-    model,
-    messages: [
-      { role: "system", content: REVIEWER_SYSTEM_PROMPT },
-      { role: "user", content: options.prompt }
-    ],
-    max_tokens: 2e3,
-    temperature: 0
-  });
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const headers = {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    };
-    if (endpoint === OPENROUTER_ENDPOINT) {
-      headers["HTTP-Referer"] = "https://openclaw.ai";
-      headers["X-Title"] = "OpenClaw Harness Reviewer";
-    }
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      body,
-      signal: controller.signal
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`Secondary reviewer API ${res.status}: ${errText.slice(0, 300)}`);
-    }
-    const data = await res.json();
-    const output = data?.choices?.[0]?.message?.content ?? "";
-    return { output, model };
-  } catch (err) {
-    if (err.name === "AbortError") {
-      return { output: "", model, error: `Secondary reviewer timeout after ${timeoutMs}ms` };
-    }
-    return { output: "", model, error: err?.message ?? String(err) };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// src/reviewer-consensus.ts
-async function runReviewerConsensus(options) {
-  const reviewModel = pluginConfig.reviewModel ?? "codex";
-  const secondaryModel = pluginConfig.consensusReviewerModel;
-  const reasoningEffort = pluginConfig.reviewerReasoningEffort;
-  const prompt = buildReviewRequest(
-    options.task,
-    options.workerResult,
-    options.originalRequest,
-    options.reviewLoopState
-  );
-  const primaryPromise = runReviewerWithCodexCli({
-    prompt,
-    workdir: options.workdir,
-    model: reviewModel,
-    reasoningEffort,
-    resumeSessionId: options.resumeSessionId
-  }).then((run) => ({
-    output: run.output,
-    sessionId: run.sessionId,
-    error: null
-  })).catch((err) => ({
-    output: "",
-    sessionId: "",
-    error: err?.message ?? String(err)
-  }));
-  const hasOpenRouter = !!pluginConfig.openRouterApiKey;
-  let secondaryPromise = null;
-  if (hasOpenRouter && secondaryModel) {
-    secondaryPromise = runReviewerWithSecondaryApi({
-      prompt,
-      model: secondaryModel
-    }).then((run) => ({
-      output: run.output,
-      sessionId: `openrouter-${run.model}`,
-      error: run.error ?? null
-    })).catch((err) => ({
-      output: "",
-      sessionId: "",
-      error: err?.message ?? String(err)
-    }));
-  }
-  const [primaryRaw, secondaryRaw] = await Promise.all([
-    primaryPromise,
-    secondaryPromise ?? Promise.resolve(null)
-  ]);
-  const primaryResult = primaryRaw.error ? null : parseReviewOutput(primaryRaw.output, options.task.id);
-  const secondaryResult = secondaryRaw && !secondaryRaw.error ? parseReviewOutput(secondaryRaw.output, options.task.id) : null;
-  if (primaryResult && secondaryResult) {
-    const bothPass = primaryResult.result === "pass" && secondaryResult.result === "pass";
-    const bothFail = primaryResult.result === "fail" && secondaryResult.result === "fail";
-    if (bothPass) {
-      console.log(`[consensus] Both reviewers pass for ${options.task.id}`);
-      return { primary: primaryResult, secondary: secondaryResult, consensus: primaryResult, mode: "both", primarySessionId: primaryRaw.sessionId };
-    }
-    if (bothFail) {
-      const mergedGaps = [...primaryResult.gaps];
-      for (const gap of secondaryResult.gaps) {
-        if (!mergedGaps.some((g) => g.type === gap.type && g.evidence === gap.evidence)) {
-          mergedGaps.push(gap);
-        }
-      }
-      const merged = {
-        ...primaryResult,
-        gaps: mergedGaps
-      };
-      console.log(`[consensus] Both reviewers fail for ${options.task.id}: ${mergedGaps.length} merged gaps`);
-      return { primary: primaryResult, secondary: secondaryResult, consensus: merged, mode: "both", primarySessionId: primaryRaw.sessionId };
-    }
-    const failResult = primaryResult.result === "fail" ? primaryResult : secondaryResult;
-    console.log(`[consensus] Reviewer disagreement for ${options.task.id}: primary=${primaryResult.result}, secondary=${secondaryResult.result} \u2192 using fail`);
-    return { primary: primaryResult, secondary: secondaryResult, consensus: failResult, mode: "both", primarySessionId: primaryRaw.sessionId };
-  }
-  if (primaryResult) {
-    if (secondaryRaw?.error) {
-      console.warn(`[consensus] Secondary reviewer failed: ${secondaryRaw.error}`);
-    }
-    return { primary: primaryResult, secondary: null, consensus: primaryResult, mode: "primary-only", primarySessionId: primaryRaw.sessionId };
-  }
-  if (secondaryResult) {
-    console.warn(`[consensus] Primary reviewer failed: ${primaryRaw.error}`);
-    return { primary: secondaryResult, secondary: null, consensus: secondaryResult, mode: "secondary-only", primarySessionId: void 0 };
-  }
-  console.error(`[consensus] Both reviewers failed: primary=${primaryRaw.error}, secondary=${secondaryRaw?.error}`);
-  const fallback = {
-    taskId: options.task.id,
-    result: "fail",
-    gaps: [],
-    rerunNeeded: true,
-    retryReviewer: true
-  };
-  return { primary: fallback, secondary: null, consensus: fallback, mode: "primary-only", primarySessionId: void 0 };
 }
 
 // src/workspace-isolation.ts
@@ -6481,16 +6317,17 @@ async function executeReviewOnly(request, workdir, ctx) {
   const reviewLoop = initReviewLoop(taskId);
   let reviewResult = null;
   let reviewerRetryCount = 0;
+  const primaryPrompt = buildReviewRequest(task, syntheticWorkerResult, request, reviewLoop);
   while (true) {
-    const consensusResult = await runReviewerConsensus({
-      task,
-      workerResult: syntheticWorkerResult,
-      originalRequest: request,
-      reviewLoopState: reviewLoop,
-      workdir
+    const primaryRun = await runReviewerWithCodexCli({
+      prompt: primaryPrompt,
+      workdir,
+      model: reviewModel,
+      reasoningEffort: reviewerReasoningEffort
     });
-    console.log(`[harness] Review-only consensus done: mode=${consensusResult.mode}, result=${consensusResult.consensus.result}, retry=${reviewerRetryCount}`);
-    reviewResult = consensusResult.consensus;
+    const parsed = parseReviewOutput(primaryRun.output, taskId);
+    console.log(`[harness] Review-only done: result=${parsed.result}, retry=${reviewerRetryCount}`);
+    reviewResult = parsed;
     if (!reviewResult.retryReviewer) break;
     reviewerRetryCount++;
     if (reviewerRetryCount >= 3) {

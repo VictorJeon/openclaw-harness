@@ -19,7 +19,6 @@ import {
   updateTaskStatus,
 } from "../checkpoint";
 import { initReviewLoop, buildReviewRequest } from "../review-loop";
-import { runReviewerConsensus } from "../reviewer-consensus";
 import { parseReviewOutput, REVIEWER_SYSTEM_PROMPT } from "../reviewer";
 import { resolveModelAlias } from "../model-resolution";
 import { resolveReviewerExecutionTarget, runReviewerWithCodexCli } from "../reviewer-runner";
@@ -337,23 +336,25 @@ async function executeReviewOnly(
   const reviewerReasoningEffort = pluginConfig.reviewerReasoningEffort;
   const reviewerTarget = resolveReviewerExecutionTarget(reviewModel, pluginConfig.defaultModel);
 
-  // Run consensus review (no fix loop — reviewer is read-only)
+  // Run primary reviewer only (Codex CLI). OpenRouter/Z.ai consensus path
+  // was removed — key leakage led to unintended OpenRouter billing and the
+  // secondary reviewer was rarely adding signal.
   const reviewLoop = initReviewLoop(taskId);
   let reviewResult: ReviewResult | null = null;
   let reviewerRetryCount = 0;
 
+  const primaryPrompt = buildReviewRequest(task, syntheticWorkerResult, request, reviewLoop);
+
   while (true) {
-    const consensusResult = await runReviewerConsensus({
-      task,
-      workerResult: syntheticWorkerResult,
-      originalRequest: request,
-      reviewLoopState: reviewLoop,
+    const primaryRun = await runReviewerWithCodexCli({
+      prompt: primaryPrompt,
       workdir,
+      model: reviewModel,
+      reasoningEffort: reviewerReasoningEffort,
     });
-
-    console.log(`[harness] Review-only consensus done: mode=${consensusResult.mode}, result=${consensusResult.consensus.result}, retry=${reviewerRetryCount}`);
-
-    reviewResult = consensusResult.consensus;
+    const parsed = parseReviewOutput(primaryRun.output, taskId);
+    console.log(`[harness] Review-only done: result=${parsed.result}, retry=${reviewerRetryCount}`);
+    reviewResult = parsed;
     if (!reviewResult.retryReviewer) break;
 
     reviewerRetryCount++;

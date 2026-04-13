@@ -111,10 +111,6 @@ export interface PluginConfig {
   workerModel?: string;      // legacy fallback alias for realtimeModel
   workerEffort?: ClaudeEffortLevel;
   reviewerReasoningEffort?: CodexReasoningEffortLevel;
-  consensusReviewerModel?: string;  // secondary reviewer model (e.g. "glm-5.1")
-  consensusReviewerApiKey?: string; // API key for secondary reviewer (Z.ai, OpenRouter, etc.)
-  consensusReviewerEndpoint?: string; // explicit endpoint URL (auto-detected if omitted)
-  openRouterApiKey?: string;        // legacy alias for consensusReviewerApiKey
   workerBackend: WorkerBackend;
   enableLegacyTools?: boolean;
   memoryV3Endpoint?: string;
