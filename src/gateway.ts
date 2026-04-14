@@ -117,30 +117,24 @@ export function registerGatewayMethods(api: any): void {
     try {
       const cp: CheckpointData = JSON.parse(readFileSync(cpPath, "utf-8"));
 
-      // Find and kill live worker processes
+      // Find and signal live worker processes via shared-state files
       const stateRoot = join("/tmp", "claude-realtime");
       const killedJobs: string[] = [];
-      for (const [taskId, session] of Object.entries(cp.sessions ?? {})) {
+      for (const [, session] of Object.entries(cp.sessions ?? {})) {
         const jobId = session.worker;
         if (!jobId) continue;
         const stateDir = join(stateRoot, jobId);
-        // Write ABORT to feedback so claude-realtime.sh exits on next poll
-        try {
-          writeFileSync(join(stateDir, "feedback"), "ABORT\n", "utf8");
-        } catch { /* best-effort */ }
-        // Write abort status
-        try {
-          writeFileSync(join(stateDir, "status"), "aborted\n", "utf8");
-        } catch { /* best-effort */ }
-        // Kill the PID if local
+        try { writeFileSync(join(stateDir, "feedback"), "ABORT\n", "utf8"); } catch {}
+        try { writeFileSync(join(stateDir, "status"), "aborted\n", "utf8"); } catch {}
         try {
           const pidStr = readFileSync(join(stateDir, "pid"), "utf8").trim();
           const pid = parseInt(pidStr, 10);
           if (pid > 0) {
             process.kill(pid, "SIGTERM");
-            killedJobs.push(`${jobId} (pid ${pid})`);
+            killedJobs.push(`${jobId} (local pid ${pid})`);
+            continue;
           }
-        } catch { /* best-effort — might be remote */ }
+        } catch {}
         killedJobs.push(jobId);
       }
 
@@ -155,12 +149,50 @@ export function registerGatewayMethods(api: any): void {
       cp.lastUpdated = new Date().toISOString();
       saveCheckpoint(cp, cp.workdir ?? "");
 
+      // Respond immediately — the hard pkill sweep runs in the background so
+      // the caller doesn't block on SSH round-trips.
       respond(true, {
         planId,
         status: "killed",
         killedJobs,
-        message: `Plan ${planId} aborted. ${killedJobs.length} job(s) signaled.`,
+        message: `Plan ${planId} aborted. ${killedJobs.length} job(s) signaled. Remote pkill sweeping in background.`,
       });
+
+      // Background: hard-kill remote worker processes + local review scripts.
+      // Remote worker PID suffixes are millisecond timestamps, not PIDs, so
+      // local kill(pid, 0) can't reach them. Pattern-match on the jobId
+      // prefix via SSH pkill to terminate the entire worker tree (bash
+      // wrapper + claude CLI + any tee/monitor helpers).
+      void (async () => {
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
+        const remoteHost = process.env.OPENCLAW_REALTIME_REMOTE_HOST || "hetzner-build";
+        const pattern = `harness-plan-${planId}`;
+
+        // Remote pkill on the realtime host (worker side)
+        try {
+          await execFileAsync("ssh", [
+            "-o", "ConnectTimeout=8",
+            "-o", "BatchMode=yes",
+            remoteHost,
+            // `|| true` so pgrep-no-match doesn't surface as SSH exit 1
+            `pkill -TERM -f '${pattern}' 2>/dev/null; exit 0`,
+          ], { timeout: 15000 });
+          console.log(`[harness.kill] Remote pkill on ${remoteHost} for ${pattern}`);
+        } catch (err: any) {
+          console.warn(`[harness.kill] Remote pkill failed (non-fatal): ${err?.message ?? err}`);
+        }
+
+        // Local pkill — catches cc-implementation-review.sh, cc-plan-review.sh,
+        // and any codex/review children still associated with this plan.
+        try {
+          await execFileAsync("pkill", ["-TERM", "-f", pattern], { timeout: 5000 });
+          console.log(`[harness.kill] Local pkill for ${pattern}`);
+        } catch {
+          // pkill returns 1 when no matches — not an error
+        }
+      })();
     } catch (err: any) {
       respond(false, { error: `Failed to kill plan: ${err?.message ?? String(err)}` });
     }

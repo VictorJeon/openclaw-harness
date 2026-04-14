@@ -8860,7 +8860,7 @@ function registerGatewayMethods(api) {
       const cp = JSON.parse((0, import_fs8.readFileSync)(cpPath, "utf-8"));
       const stateRoot = (0, import_path8.join)("/tmp", "claude-realtime");
       const killedJobs = [];
-      for (const [taskId, session] of Object.entries(cp.sessions ?? {})) {
+      for (const [, session] of Object.entries(cp.sessions ?? {})) {
         const jobId = session.worker;
         if (!jobId) continue;
         const stateDir = (0, import_path8.join)(stateRoot, jobId);
@@ -8877,7 +8877,8 @@ function registerGatewayMethods(api) {
           const pid = parseInt(pidStr, 10);
           if (pid > 0) {
             process.kill(pid, "SIGTERM");
-            killedJobs.push(`${jobId} (pid ${pid})`);
+            killedJobs.push(`${jobId} (local pid ${pid})`);
+            continue;
           }
         } catch {
         }
@@ -8896,8 +8897,34 @@ function registerGatewayMethods(api) {
         planId,
         status: "killed",
         killedJobs,
-        message: `Plan ${planId} aborted. ${killedJobs.length} job(s) signaled.`
+        message: `Plan ${planId} aborted. ${killedJobs.length} job(s) signaled. Remote pkill sweeping in background.`
       });
+      void (async () => {
+        const { execFile: execFile4 } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile4);
+        const remoteHost = process.env.OPENCLAW_REALTIME_REMOTE_HOST || "hetzner-build";
+        const pattern = `harness-plan-${planId}`;
+        try {
+          await execFileAsync("ssh", [
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "BatchMode=yes",
+            remoteHost,
+            // `|| true` so pgrep-no-match doesn't surface as SSH exit 1
+            `pkill -TERM -f '${pattern}' 2>/dev/null; exit 0`
+          ], { timeout: 15e3 });
+          console.log(`[harness.kill] Remote pkill on ${remoteHost} for ${pattern}`);
+        } catch (err) {
+          console.warn(`[harness.kill] Remote pkill failed (non-fatal): ${err?.message ?? err}`);
+        }
+        try {
+          await execFileAsync("pkill", ["-TERM", "-f", pattern], { timeout: 5e3 });
+          console.log(`[harness.kill] Local pkill for ${pattern}`);
+        } catch {
+        }
+      })();
     } catch (err) {
       respond(false, { error: `Failed to kill plan: ${err?.message ?? String(err)}` });
     }
