@@ -8904,7 +8904,7 @@ function registerGatewayMethods(api) {
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile4);
         const remoteHost = process.env.OPENCLAW_REALTIME_REMOTE_HOST || "hetzner-build";
-        const pattern = `harness-plan-${planId}`;
+        const pattern = planId;
         const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
         try {
           await execFileAsync("ssh", [

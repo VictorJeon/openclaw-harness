@@ -168,7 +168,11 @@ export function registerGatewayMethods(api: any): void {
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
         const remoteHost = process.env.OPENCLAW_REALTIME_REMOTE_HOST || "hetzner-build";
-        const pattern = `harness-plan-${planId}`;
+        // planId already starts with "plan-" (e.g. "plan-20260414-y0budf").
+        // Worker jobIds are shaped "harness-${planId}-task-N-<ts>", so the
+        // match pattern is just ${planId} — prepending another "harness-plan-"
+        // would produce "harness-plan-plan-..." and never match.
+        const pattern = planId;
 
         const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
