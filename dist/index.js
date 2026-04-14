@@ -8905,6 +8905,7 @@ function registerGatewayMethods(api) {
         const execFileAsync = promisify(execFile4);
         const remoteHost = process.env.OPENCLAW_REALTIME_REMOTE_HOST || "hetzner-build";
         const pattern = `harness-plan-${planId}`;
+        const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
         try {
           await execFileAsync("ssh", [
             "-o",
@@ -8912,16 +8913,35 @@ function registerGatewayMethods(api) {
             "-o",
             "BatchMode=yes",
             remoteHost,
-            // `|| true` so pgrep-no-match doesn't surface as SSH exit 1
+            // `exit 0` so pgrep-no-match doesn't surface as SSH exit 1
             `pkill -TERM -f '${pattern}' 2>/dev/null; exit 0`
           ], { timeout: 15e3 });
-          console.log(`[harness.kill] Remote pkill on ${remoteHost} for ${pattern}`);
+          console.log(`[harness.kill] Remote pkill -TERM on ${remoteHost} for ${pattern}`);
         } catch (err) {
-          console.warn(`[harness.kill] Remote pkill failed (non-fatal): ${err?.message ?? err}`);
+          console.warn(`[harness.kill] Remote pkill -TERM failed (non-fatal): ${err?.message ?? err}`);
         }
         try {
           await execFileAsync("pkill", ["-TERM", "-f", pattern], { timeout: 5e3 });
-          console.log(`[harness.kill] Local pkill for ${pattern}`);
+          console.log(`[harness.kill] Local pkill -TERM for ${pattern}`);
+        } catch {
+        }
+        await sleep2(2e3);
+        try {
+          await execFileAsync("ssh", [
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "BatchMode=yes",
+            remoteHost,
+            `pkill -9 -f '${pattern}' 2>/dev/null; exit 0`
+          ], { timeout: 15e3 });
+          console.log(`[harness.kill] Remote pkill -9 sweep on ${remoteHost}`);
+        } catch (err) {
+          console.warn(`[harness.kill] Remote pkill -9 failed (non-fatal): ${err?.message ?? err}`);
+        }
+        try {
+          await execFileAsync("pkill", ["-9", "-f", pattern], { timeout: 5e3 });
+          console.log(`[harness.kill] Local pkill -9 sweep for ${pattern}`);
         } catch {
         }
       })();

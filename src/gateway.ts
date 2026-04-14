@@ -170,28 +170,50 @@ export function registerGatewayMethods(api: any): void {
         const remoteHost = process.env.OPENCLAW_REALTIME_REMOTE_HOST || "hetzner-build";
         const pattern = `harness-plan-${planId}`;
 
-        // Remote pkill on the realtime host (worker side)
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+        // Phase 1 — SIGTERM sweep (graceful).
+        // Remote worker tree on Hetzner.
         try {
           await execFileAsync("ssh", [
             "-o", "ConnectTimeout=8",
             "-o", "BatchMode=yes",
             remoteHost,
-            // `|| true` so pgrep-no-match doesn't surface as SSH exit 1
+            // `exit 0` so pgrep-no-match doesn't surface as SSH exit 1
             `pkill -TERM -f '${pattern}' 2>/dev/null; exit 0`,
           ], { timeout: 15000 });
-          console.log(`[harness.kill] Remote pkill on ${remoteHost} for ${pattern}`);
+          console.log(`[harness.kill] Remote pkill -TERM on ${remoteHost} for ${pattern}`);
         } catch (err: any) {
-          console.warn(`[harness.kill] Remote pkill failed (non-fatal): ${err?.message ?? err}`);
+          console.warn(`[harness.kill] Remote pkill -TERM failed (non-fatal): ${err?.message ?? err}`);
         }
-
-        // Local pkill — catches cc-implementation-review.sh, cc-plan-review.sh,
-        // and any codex/review children still associated with this plan.
+        // Local review wrappers (cc-*-review.sh, codex children, ssh clients
+        // that args-match the pattern).
         try {
           await execFileAsync("pkill", ["-TERM", "-f", pattern], { timeout: 5000 });
-          console.log(`[harness.kill] Local pkill for ${pattern}`);
-        } catch {
-          // pkill returns 1 when no matches — not an error
+          console.log(`[harness.kill] Local pkill -TERM for ${pattern}`);
+        } catch { /* no match is fine */ }
+
+        // Give TERM handlers 2 seconds to clean up.
+        await sleep(2000);
+
+        // Phase 2 — SIGKILL for anything that ignored TERM.
+        // Catches: ssh clients stuck in uninterruptible state, claude CLI mid
+        // request, any child that doesn't honor SIGTERM promptly.
+        try {
+          await execFileAsync("ssh", [
+            "-o", "ConnectTimeout=8",
+            "-o", "BatchMode=yes",
+            remoteHost,
+            `pkill -9 -f '${pattern}' 2>/dev/null; exit 0`,
+          ], { timeout: 15000 });
+          console.log(`[harness.kill] Remote pkill -9 sweep on ${remoteHost}`);
+        } catch (err: any) {
+          console.warn(`[harness.kill] Remote pkill -9 failed (non-fatal): ${err?.message ?? err}`);
         }
+        try {
+          await execFileAsync("pkill", ["-9", "-f", pattern], { timeout: 5000 });
+          console.log(`[harness.kill] Local pkill -9 sweep for ${pattern}`);
+        } catch { /* no match is fine */ }
       })();
     } catch (err: any) {
       respond(false, { error: `Failed to kill plan: ${err?.message ?? String(err)}` });
